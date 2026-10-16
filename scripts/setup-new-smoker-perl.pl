@@ -4,7 +4,7 @@
 #
 # Author: Slaven Rezic
 #
-# Copyright (C) 2013,2014,2015,2016,2017,2018,2019,2020 Slaven Rezic. All rights reserved.
+# Copyright (C) 2013,2014,2015,2016,2017,2018,2019,2020,2024,2025 Slaven Rezic. All rights reserved.
 # This program is free software; you can redistribute it and/or
 # modify it under the same terms as Perl itself.
 #
@@ -229,7 +229,7 @@ if (-f $downloaded_perl_bz2 && -s $downloaded_perl_bz2) {
     $downloaded_perl = $downloaded_perl_gz;
 }
 if (!defined $download_url) {
-    $download_url = "http://www.cpan.org/src/5.0/$perl_tar_gz"; # XXX only .gz
+    $download_url = "https://www.cpan.org/src/5.0/$perl_tar_gz"; # XXX only .gz
 } else {
     basename($download_url) eq $perl_tar_gz
 	or die "Unexpected download URL '$download_url' does not match expected basename '$perl_tar_gz'";
@@ -261,7 +261,7 @@ $CPAN::Config = {
   'prefs_dir' => q[__HOME__/.cpan/prefs],
   'recommends_policy' => q[0],
   'test_report' => q[1],
-  'urllist' => [q[http://cpan.cpantesters.org/], q[http://cpan.develooper.com/], q[ftp://ftp.funet.fi/pub/CPAN]],
+  'urllist' => [q[http://cpan.metacpan.org/], q[http://www.cpan.org/], q[ftp://ftp.funet.fi/pub/CPAN], q[http://cpan.cpantesters.org/]],
   'yaml_module' => q[YAML::Syck],
 };
 1;
@@ -449,6 +449,7 @@ step "Build perl",
 	    my @build_cmd = (
 			     ($cc ? "env CC='$cc' " : '') .
 			     "nice ./configure.gnu --prefix=$perldir" .
+			     ' -Uinstallusrbinperl' . # never install perl as /usr/bin/perl (may happen on freebsd systems)
 			     ($need_usedevel ? ' -Dusedevel' : '') .
 			     (!$use_mallocwrap ? ' -Dusemallocwrap=no' : '') . # usemallocwrap=yes is probably default
 			     ($build_debug ? ' -DDEBUGGING' : '') .
@@ -566,14 +567,10 @@ if ($use_cpm) {
 	using => sub {
 	    my @missing_modules = modules_installed_check(\@toolchain_modules);
 
-	    # XXX Temporary (?) hack: use the stable
-	    # RGIERSIG/Expect-1.21.tar.gz instead of Expect 1.31 because
-	    # the latter does not always pass tests. Note that this
-	    # may actually create a downgrade of an already installed
-	    # Expect (but this should probably be unlikely)
-	    # UPDATE: Expect 1.32 has also problematic tests.
+	    # See "Install modules needed for CPAN::Reporter" step
+	    # for an explanation.
 	    my @to_install = map {
-		$_ eq 'Expect' ? 'Expect~<1.31' : $_;
+		$_ eq 'Expect' ? ('Expect~<1.31', 'Expect') : $_;
 	    } @missing_modules;
 
 	    local $ENV{PERL_MM_USE_DEFAULT} = 1;
@@ -615,14 +612,15 @@ step "Install modules needed for CPAN::Reporter",
     using => sub {
 	my @missing_modules = modules_installed_check(\@toolchain_modules);
 
-	# XXX Temporary (?) hack: use the stable
-	# RGIERSIG/Expect-1.21.tar.gz instead of Expect 1.31 because
-	# the latter does not always pass tests. Note that this
+	# XXX Temporary (?) hack: first install the stable
+	# RGIERSIG/Expect-1.21.tar.gz instead of newer Expect versions,
+	# e.g. 1.31, 1.32 and 1.35 do not always pass tests. Note that this
 	# may actually create a downgrade of an already installed
-	# Expect (but this should probably be unlikely)
-	# UPDATE: Expect 1.32 has also problematic tests.
+	# Expect (but this should probably be unlikely).
+	# After that try to upgrade Expect to the newest version
+	# (which may fail, but this step will pass)
 	my @to_install = map {
-	    $_ eq 'Expect' ? 'RGIERSIG/Expect-1.21.tar.gz' : $_;
+	    $_ eq 'Expect' ? ('RGIERSIG/Expect-1.21.tar.gz', 'Expect') : $_;
 	} @missing_modules;
 
 	local $ENV{HARNESS_OPTIONS};

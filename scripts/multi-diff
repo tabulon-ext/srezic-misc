@@ -1,32 +1,68 @@
-#!/usr/bin/perl
+#!/usr/bin/env perl
 #
-# Copyright (C) 2014,2018 Slaven Rezic. All rights reserved.
+# Copyright (C) 2014,2018,2024,2025,2026 Slaven Rezic. All rights reserved.
 # This package is free software; you can redistribute it and/or
 # modify it under the same terms as Perl itself.
 
 use strict;
 use warnings;
-our $VERSION = 0.002;
+our $VERSION = 0.006;
 
 use File::Temp qw(tempfile);
 use Getopt::Long;
 
-GetOptions()
-    or die "usage?";
+sub usage () {
+    require File::Basename;
+    die "usage: @{[ File::Basename::basename($0) ]} [-r|--reverse] [-U|--unified num] [--word-diff|--color-word-diff] file1 file2 ...\n";
+}
+
+my $reverse;
+my $word_diff;
+my $color_word_diff;
+my $unified_num;
+GetOptions(
+    "reverse|r" => \$reverse,
+    "word-diff" => \$word_diff,
+    "color-word-diff" => \$color_word_diff, # private
+    "U|unified=i" => \$unified_num,
+)
+    or usage;
 my @files = @ARGV;
-@files or die "usage?";
+@files or usage;
+
+@files = reverse @files if $reverse;
 
 my $principal_file = shift @files;
 print "="x70, "\n";
 print "=== $principal_file is principal file\n";
 my %seen_file = ($principal_file => 1);
+my $count_diffs = 0;
 for my $file (@files) {
     next if $seen_file{$file}++;
     print "="x70, "\n";
     print "=== $file\n";
-    my @cmd = ("diff", "-I", '$HeadURL:', "-I", '$Id:', "-u", $principal_file, $file);
+    my @cmd;
+    if ($color_word_diff) {
+	push @cmd, 'color-wdiff';
+    } elsif ($word_diff) {
+	push @cmd, 'wdiff';
+    } else {
+	push @cmd, (
+	    "diff", "-I", '$HeadURL:', "-I", '$Id:',
+	    (defined $unified_num ? "--unified=$unified_num" : "-u"),
+	);
+    }
+    push @cmd, ($principal_file, $file);
     system @cmd;
-}    
+    if ($? != 0) {
+	$count_diffs++;
+    }
+}
+
+if ($count_diffs != 0) {
+    exit 1;
+}
+
 __END__
 
 =head1 NAME
@@ -35,12 +71,24 @@ multi-diff - make a diff over multiple files
 
 =head1 SYNOPSIS
 
-    multi-diff file ...
+    multi-diff [-r|--reverse] [-U|--unified num] [--word-diff|--color-word-diff] file ...
 
 =head1 DESCRIPTION
 
 Run a series of L<diff(1)> calls with the first file in the argument
 list against all other files.
+
+Use the C<--reverse> option to reverse the list of files.
+
+Use the C<-U> or C<--unified> option to change the number of lines of
+unified context.
+
+Use C<--word-diff> for word diff. Requires L<wdiff(1)> to be installed.
+
+Use C<--color-word-diff> for colorized word diff. Requires a private
+helper script around C<wdiff> to be installed.
+
+Note that C<-r> and C<-U> are not available with any word diff.
 
 =head1 AUTHOR
 

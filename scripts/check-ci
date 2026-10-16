@@ -12,56 +12,81 @@ sub debug ($);
 sub guess_project_from_git ();
 
 sub usage () {
-    die "usage: $0 [--debug] [--travis] [--appveyor] [--github-actions [--use-gh|--no-use-gh]] [--commit SHA1] [--wait seconds] [--timeout seconds] user/repo\n";
+    die "usage: $0
+                   [--travis] [--appveyor]
+                   [--github-actions [--use-gh|--no-use-gh] [--filter-github-workflow-rx regexp|--filter-github-workflow-filename filename]]
+                   [--commit SHA1]
+                   [--wait seconds] [--no-loop] [--timeout seconds] [--total-timeout seconds]
+                   [--api-retries N]
+                   [--debug]
+                   [user/repo]\n";
 }
 
 my $debug;
-my $check_travis;
-my $check_appveyor;
-my $check_github_actions;
+my @supported_ci_systems = ('travis', 'appveyor', 'github actions');
+my %check;
 my $commit;
 my $wait_seconds = 15;
 my $timeout = 10;
+my $total_timeout = 3600;
 my $github_api_limit_seconds = 60; # do at most one request per minute because of rate limiting
 my $use_travis_v3 = 1;
+my $api_max_retries = 3;
 my $use_gh = undef; # undef mean: maybe
+my $do_loop = 1;
+my $filter_github_workflow_rx;
+my $filter_github_workflow_filename;
 GetOptions(
 	   "d|debug" => \$debug,
-	   "travis!" => \$check_travis,
-	   "appveyor!" => \$check_appveyor,
-	   "github-actions!" => \$check_github_actions,
+	   "travis!"         => \$check{"travis"},
+	   "appveyor!"       => \$check{"appveyor"},
+	   "github-actions!" => \$check{"github actions"},
 	   "commit=s" => \$commit,
 	   "wait=i" => \$wait_seconds,
 	   "t|timeout=i" => \$timeout,
+	   "total-timeout=i" => \$total_timeout,
 	   "use-gh!" => \$use_gh,
+	   "loop!" => \$do_loop,
+	   "filter-github-workflow-rx=s" => \$filter_github_workflow_rx,
+	   "api-retries=i" => \$api_max_retries,
+	   "filter-github-workflow-filename=s" => \$filter_github_workflow_filename,
 	  )
     or usage;
 my $repo = shift || guess_project_from_git
     or usage;
-if (!$check_travis && !$check_appveyor && !$check_github_actions) {
+if (!$check{"travis"} && !$check{"appveyor"} && !$check{"github actions"}) {
     # guess from script name
     my $basename = basename($0);
     if ($basename =~ /travis/) {
-	$check_travis = 1;
+	$check{"travis"} = 1;
     } elsif ($basename =~ /appveyor/) {
-	$check_appveyor = 1;
+	$check{"appveyor"} = 1;
     } elsif ($basename =~ /github.actions/) {
-	$check_github_actions = 1;
+	$check{"github actions"} = 1;
     } else {
 	# for "check-ci" or something else: check both if appropriate files exist
+	# but ignore any CI system explicitly disabled using --no-... option
 	chomp(my $rootdir = `git rev-parse --show-toplevel`);
-	$check_travis   = -f "$rootdir/.travis.yml";
-	$check_appveyor = -f "$rootdir/appveyor.yml" || -f "$rootdir/.appveyor.yml";
-	$check_github_actions = -d "$rootdir/.github/workflows" && bsd_glob("$rootdir/.github/workflows/*");
+	$check{"travis"}         = !defined $check{"travis"}         && -f "$rootdir/.travis.yml";
+	$check{"appveyor"}       = !defined $check{"appveyor"}       && -f "$rootdir/appveyor.yml" || -f "$rootdir/.appveyor.yml";
+	$check{"github actions"} = !defined $check{"github actions"} && -d "$rootdir/.github/workflows" && bsd_glob("$rootdir/.github/workflows/*");
     }
 }
 
-if (!$check_travis && !$check_appveyor && !$check_github_actions) {
+if (!$check{"travis"} && !$check{"appveyor"} && !$check{"github actions"}) {
     die "No CI system detected.\n";
 }
 
-if ($check_github_actions && !defined $use_gh) {
+if ($check{"github actions"} && !defined $use_gh) {
     $use_gh = is_in_path('gh') ? 1 : 0;
+}
+
+if (defined $filter_github_workflow_rx) {
+    $filter_github_workflow_rx = qr{$filter_github_workflow_rx};
+}
+
+if ($total_timeout) {
+    alarm($total_timeout);
 }
 
 my $success = check_ci $repo, commit => $commit, wait => $wait_seconds;
@@ -83,6 +108,10 @@ exit($success ? 0 : 1);
 	    }
 	}
 
+	if ($check{'github actions'} && $repo !~ m{/}) {
+	    die "Repo '$repo' must be specified as owner/project.\n";
+	}
+
 	require LWP::UserAgent;
 	require JSON::XS;
 	require URI::Escape;
@@ -95,11 +124,7 @@ exit($success ? 0 : 1);
 	    print STDERR "\r";
 	};
 
-	my %is_active = (
-			 "travis"         => $check_travis,
-			 "appveyor"       => $check_appveyor,
-			 "github actions" => $check_github_actions,
-			);
+	my %is_active = map { ($_ => $check{$_}) } @supported_ci_systems;
 	my %is_failed;
 	my $mark_as_failed = sub ($$) {
 	    my($system, $error) = @_;
@@ -116,6 +141,7 @@ exit($success ? 0 : 1);
 	######################################################################
 	# Github Actions
 	my $last_github_api_access;
+	my $github_api_consecutive_errors = 0;
 	my $do_github_api_call = sub ($@) {
 	    my($rel_api_url, %opts) = @_;
 	    my $do_rate_check = delete $opts{do_rate_check};
@@ -127,17 +153,28 @@ exit($success ? 0 : 1);
 		debug "About to run '@cmd'";
 		open my $fh, '-|', @cmd
 		    or do {
-			$mark_as_failed->('github actions', "Error running '@cmd': $!");
+			$github_api_consecutive_errors++;
+			if ($github_api_consecutive_errors > $api_max_retries) {
+			    $mark_as_failed->('github actions', "Error running '@cmd': $! (after $api_max_retries retries)");
+			} else {
+			    debug "Error running '@cmd': $! (attempt $github_api_consecutive_errors/$api_max_retries)";
+			}
 			return;
 		    };
 		local $/;
 		$json = <$fh>;
 		close $fh
 		    or do {
-			$mark_as_failed->('github actions', "Error running '@cmd': $!");
+			$github_api_consecutive_errors++;
+			if ($github_api_consecutive_errors > $api_max_retries) {
+			    $mark_as_failed->('github actions', "Error running '@cmd': $! (after $api_max_retries retries)");
+			} else {
+			    debug "Error running '@cmd': $! (attempt $github_api_consecutive_errors/$api_max_retries)";
+			}
 			return;
 		    };
 		debug "Fetch from github actions via gh successful";
+		$github_api_consecutive_errors = 0;
 	    } else {
 		if (defined $last_github_api_access && time < $last_github_api_access + $github_api_limit_seconds) {
 		    debug "Limit accesses against github API to avoid rate limit errors";
@@ -151,20 +188,56 @@ exit($success ? 0 : 1);
 		    debug "Rate limit exceeded while fetching from github actions";
 		    return undef;
 		} elsif (!$res->is_success) {
-		    $mark_as_failed->('github actions', "Request to $url failed: " . $res->status_line);
+		    $github_api_consecutive_errors++;
+		    if ($github_api_consecutive_errors > $api_max_retries) {
+			$mark_as_failed->('github actions', "Request to $url failed: " . $res->status_line . " (after $api_max_retries retries)");
+		    } else {
+			debug "Request to $url failed: " . $res->status_line . " (attempt $github_api_consecutive_errors/$api_max_retries)";
+		    }
+		    return undef;
 		}
 		debug "Fetch from github actions successful";
+		$github_api_consecutive_errors = 0;
 		$json = $res->decoded_content(charset => 'none');
 	    }
 	    return JSON::XS::decode_json($json);
 	};
 	my $get_current_github_actions_run_id = sub {
-	    my $data = $do_github_api_call->("repos/$repo/actions/runs");
+	    my $data;
+	    if ($filter_github_workflow_filename) {
+		$data = $do_github_api_call->("repos/$repo/actions/workflows/$filter_github_workflow_filename/runs?per_page=100");
+	    } else {
+		$data = $do_github_api_call->("repos/$repo/actions/runs?per_page=100");
+	    }
+	    # First gather the currently running workflows matching the wished commit id
+	    my @candidates;
 	    for my $workflow_run (@{ $data->{workflow_runs} || [] }) {
-		if ($workflow_run->{'head_sha'} eq $current_commit_id) {
-		    return $workflow_run->{'id'};
+		if ($workflow_run->{'head_sha'} eq $current_commit_id ||
+		    $workflow_run->{'head_branch'} eq $current_commit_id
+		   ) {
+		    push @candidates, { path => $workflow_run->{path}, id => $workflow_run->{'id'} };
 		}
 	    }
+	    # Then filter by --filter-github-workflow-rx (if set)
+	    my @filtered_candidates = $filter_github_workflow_rx ? (grep { $_->{path} =~ $filter_github_workflow_rx } @candidates) : @candidates;
+
+	    # Pick the only or first workflow run
+	    if (@filtered_candidates) {
+		my($path, $id) = @{$filtered_candidates[0]}{qw(path id) };
+		# If there's more than one matching active workflow, then pick the first, but tell the user which one was chosen.
+		if (@candidates > 1) {
+		    if ($debug) {
+			debug "The following workflow candidates exist:";
+			for my $candidate (@candidates) {
+			    debug "* $candidate->{path}";
+			}
+		    }
+		    print STDERR colored("INFO:", "yellow") . " picked workflow " . colored($path, "yellow") . "\n";
+		}
+		return $id;
+	    }
+
+	    # Nothing found?
 	    debug "Workflow run for commit $current_commit_id not found at github actions";
 	    undef;
 	};
@@ -184,13 +257,21 @@ exit($success ? 0 : 1);
 	######################################################################
 	# Appveyor
 	my $appveyor_build_url = "https://ci.appveyor.com/api/projects/$repo";
+	my $appveyor_api_consecutive_errors = 0;
 	my $get_current_appveyor_build = sub {
 	    debug "About to get from $appveyor_build_url";
 	    my $res = $ua->get($appveyor_build_url);
 	    if (!$res->is_success) {
-		$mark_as_failed->('appveyor', "Request to $appveyor_build_url failed: " . $res->status_line);
+		$appveyor_api_consecutive_errors++;
+		if ($appveyor_api_consecutive_errors > $api_max_retries) {
+		    $mark_as_failed->('appveyor', "Request to $appveyor_build_url failed: " . $res->status_line . " (after $api_max_retries retries)");
+		} else {
+		    debug "Request to $appveyor_build_url failed: " . $res->status_line . " (attempt $appveyor_api_consecutive_errors/$api_max_retries)";
+		}
+		return undef;
 	    }
 	    debug "Fetch from appveyor successful";
+	    $appveyor_api_consecutive_errors = 0;
 	    my $data = JSON::XS::decode_json($res->decoded_content(charset => 'none'));
 	    if ($data->{build}->{commitId} eq $current_commit_id) {
 		return $data->{build};
@@ -203,15 +284,23 @@ exit($success ? 0 : 1);
 	# Travis CI
 	my $travis_domain = 'travis-ci.com'; # was travis-ci.org
 	my $travis_build_id;
+	my $travis_api_consecutive_errors = 0;
 	my $get_current_travis_build_v3 = sub {
 	    my $repo_escaped = URI::Escape::uri_escape($repo);
 	    my $travis_builds_url = "https://api.$travis_domain/repo/$repo_escaped/builds";
 	    debug "About to get from $travis_builds_url";
 	    my $res = $ua->get($travis_builds_url, 'Travis-API-Version' => 3);
 	    if (!$res->is_success) {
-		$mark_as_failed->('travis', "Request to $travis_builds_url failed: " . $res->status_line);
+		$travis_api_consecutive_errors++;
+		if ($travis_api_consecutive_errors > $api_max_retries) {
+		    $mark_as_failed->('travis', "Request to $travis_builds_url failed: " . $res->status_line . " (after $api_max_retries retries)");
+		} else {
+		    debug "Request to $travis_builds_url failed: " . $res->status_line . " (attempt $travis_api_consecutive_errors/$api_max_retries)";
+		}
+		return undef;
 	    }
 	    debug "Fetch from travis successful";
+	    $travis_api_consecutive_errors = 0;
 	    my $data = JSON::XS::decode_json($res->decoded_content(charset => 'none'));
 	    for my $build (@{ $data->{builds} }) {
 		if ($build->{commit}->{sha} eq $current_commit_id) {
@@ -226,9 +315,16 @@ exit($success ? 0 : 1);
 	    debug "About to get from $travis_builds_url";
 	    my $res = $ua->get($travis_builds_url);
 	    if (!$res->is_success) {
-		$mark_as_failed->('travis', "Request to $travis_builds_url failed: " . $res->status_line);
+		$travis_api_consecutive_errors++;
+		if ($travis_api_consecutive_errors > $api_max_retries) {
+		    $mark_as_failed->('travis', "Request to $travis_builds_url failed: " . $res->status_line . " (after $api_max_retries retries)");
+		} else {
+		    debug "Request to $travis_builds_url failed: " . $res->status_line . " (attempt $travis_api_consecutive_errors/$api_max_retries)";
+		}
+		return undef;
 	    }
 	    debug "Fetch from travis successful";
+	    $travis_api_consecutive_errors = 0;
 	    my $data = JSON::XS::decode_json($res->decoded_content(charset => 'none'));
 	    for my $build (@$data) {
 		if ($build->{commit} eq $current_commit_id) {
@@ -295,6 +391,7 @@ exit($success ? 0 : 1);
 			if (!$travis_build) {
 			    if (!$is_failed{travis}) {
 				print STDERR "Status at travis:         cannot find commit $current_commit_id\n";
+				$mark_as_failed->('travis', "Cannot find commit in --no-loop mode") if !$do_loop;
 			    }
 			    last DO_TRAVIS;
 			} else {
@@ -353,6 +450,7 @@ exit($success ? 0 : 1);
 		    if (!$appveyor_build) {
 			if (!$is_failed{appveyor}) {
 			    print STDERR "Status at appveyor:       cannot find commit $current_commit_id\n";
+			    $mark_as_failed->('appveyor', "Cannot find commit in --no-loop mode") if !$do_loop;
 			}
 			last DO_APPVEYOR;
 		    } else {
@@ -389,6 +487,7 @@ exit($success ? 0 : 1);
 		    if (!$github_actions_run_id) {
 			if (!$is_failed{"github actions"}) {
 			    print STDERR "Status at github actions: cannot find $current_commit_id\n";
+			    $mark_as_failed->('github actions', "Cannot find commit in --no-loop mode") if !$do_loop;
 			}
 			last DO_GITHUB_ACTIONS;
 		    } else {
@@ -453,7 +552,7 @@ exit($success ? 0 : 1);
 			    $maybe_colored->("successful", $successful, "green")." ".
 			    $maybe_colored->("failures",   $failures,   "red")."\n";
 			if ($failures) {
-			    $mark_as_failed->('github actions', "At least one job failed. See https://github.com/$repo/actions for more information.");
+			    $mark_as_failed->('github actions', "At least one job failed. See https://github.com/$repo/actions/runs/$github_actions_run_id for more information.");
 			} elsif ($run_completed) {
 			    $mark_as_finished->('github actions');
 			}
@@ -465,17 +564,15 @@ exit($success ? 0 : 1);
 		last;
 	    }
 
+	    last if !$do_loop;
+
 	    $wait->();
 	}
 
-	if ($check_travis && !$is_failed{travis}) {
-	    print STDERR "travis-ci build was " . colored("successful", "green") . "\n";
-	}
-	if ($check_appveyor && !$is_failed{appveyor}) {
-	    print STDERR "appveyor build was " . colored("successful", "green") . "\n";
-	}
-	if ($check_github_actions && !$is_failed{'github actions'}) {
-	    print STDERR "github actions build was " . colored("successful", "green") . "\n";
+	for my $ci_system (@supported_ci_systems) {
+	    if ($check{$ci_system} && !$is_failed{$ci_system}) {
+		print STDERR "$ci_system build was " . colored("successful", "green") . "\n";
+	    }
 	}
 
 	return !$is_failed{travis} && !$is_failed{appveyor} && !$is_failed{'github actions'};

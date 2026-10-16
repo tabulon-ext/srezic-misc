@@ -4,12 +4,11 @@
 #
 # Author: Slaven Rezic
 #
-# Copyright (C) 2008,2012,2013,2014,2015,2017,2018,2019 Slaven Rezic. All rights reserved.
+# Copyright (C) 2008,2012,2013,2014,2015,2017,2018,2019,2024,2025 Slaven Rezic. All rights reserved.
 # This program is free software; you can redistribute it and/or
 # modify it under the same terms as Perl itself.
 #
-# Mail: slaven@rezic.de
-# WWW:  http://www.rezic.de/eserte/
+# https://github.com/eserte/srezic-misc
 #
 
 use strict;
@@ -205,7 +204,24 @@ REPORTS_LOOP: for my $file (@reports) {
 	    }
 
 	    last DO_SEND if $r->send;
-	    warn "[" . _ts . "] Something failed in $process_file: " . $r->errstr . ".\n";
+	    my $errstr = $r->errstr;
+	    if ($errstr =~ m{(
+				 \Qfact submission failed: No healthy backends\E
+			     |   \Qfact submission failed: All backends failed or unhealthy\E
+			     |   \Qfact submission failed: Proxy Error\E
+			     |   \Qfact submission failed: Internal Exception\E
+			     |   \Qfact submission failed: backend read error\E
+			     |   \Qfact submission failed: Gateway Error\E
+			     |   \Qfact submission failed: Backend unavailable, connection timeout\E
+			     |   \Qfact submission failed: first byte timeout\E
+			     |   \Qfact submission failed: Not Found\E
+			     |   \Qfact submission failed: Bad Gateway\E
+			     )}x) {
+		# short error message
+		warn "[" . _ts . "] Failed for $process_file: $1\n";
+	    } else {
+		warn "[" . _ts . "] Something failed in $process_file: " . $errstr . ".\n";
+	    }
 	    if ($try == $max_retry) {
 		die "Stop.\n";
 	    }
@@ -459,6 +475,6 @@ Slaven Rezic
 
 =head1 SEE ALSO
 
-L<Test::Reporter>.
+L<Test::Reporter>, L<Test::Reporter::Transport::Metabase>.
 
 =cut

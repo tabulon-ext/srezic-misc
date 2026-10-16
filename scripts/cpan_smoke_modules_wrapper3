@@ -13,7 +13,8 @@ sub maybe_xterm_conf ($);
 sub _get_system_perl ();
 
 my @specs;
-my $mirror_url = "http://cpan.cpantesters.org/";
+#my $mirror_url = "http://cpan.cpantesters.org/"; # XXX as of 2025-11-23 not working anymore
+my $mirror_url = 'http://cpan.metacpan.org/';
 my $min_build_dir_avail;
 my @pv;
 my $scripts_dir = $FindBin::RealBin;
@@ -245,7 +246,7 @@ sub scenario_locale {
 	# (no message catalog for libc)
 	#
 	# LANGUAGE has even precedence over LC_ALL, it seems, so unset it.
-	my $non_en_locale = $^O eq 'freebsd' ? 'de_DE.ISO8859-1' : 'de_DE.UTF-8';
+	my $non_en_locale = $^O eq 'freebsd' && do { no warnings 'numeric', 'once'; require Config; $Config::Config{osvers} < 11 } ? 'de_DE.ISO8859-1' : 'de_DE.UTF-8';
 	my $cmd = $basecmd;
 	_scenario_cmd_expect_fail(\$cmd);
 	warn "env LC_ALL=$non_en_locale LANGUAGE= $cmd ...\n";

@@ -6,6 +6,11 @@ on:
       - '*travis*'
       - '*appveyor*'
       - '*doozer*'
+  workflow_dispatch:
+    inputs:
+      debug:
+        type: boolean
+        default: false
 
 jobs:
 
@@ -15,8 +20,8 @@ jobs:
     strategy:
      matrix:
        include:
-         - os: 'ubuntu-20.04'
-         - os: 'ubuntu-18.04'
+         - os: 'ubuntu-22.04'
+         - os: 'ubuntu-24.04'
     steps:
     - name: apt hacks
       # /etc/apt/sources.list should be sufficient; all the other repositories are possibly problematic
@@ -24,26 +29,41 @@ jobs:
         sudo rm -f /etc/apt/sources.list.d/*.list
         sudo apt-get update -qq
       if: "startsWith(matrix.os, 'ubuntu-')"
-    - uses: actions/checkout@v2
+    - uses: taiki-e/checkout-action@v1
+    - uses: eserte/Doit/.github/actions/install-doit-from-github@master
     - name: Build and test
       run: |
         set -e
+        echo "::group::Preinstall Debian packages"
         sudo apt-get install -q --no-install-recommends \
             libdb-dev \
             apt-file \
             cvs \
             rcs \
             libyaml-libyaml-perl libmodule-build-perl libipc-run-perl libfile-copy-recursive-perl libclass-std-perl
+        sudo apt-file update
 
+        echo "::group::setup ci-helper-cpan-pm"
         git clone https://github.com/eserte/travis-helper-cpan-pm.git
-        ./travis-helper-cpan-pm/travis-helper-cpan-pm --distroprefs=https://github.com/eserte/srezic-cpan-distroprefs --enable-sysdeps
+        ./travis-helper-cpan-pm/travis-helper-cpan-pm --distroprefs=https://github.com/eserte/srezic-cpan-distroprefs --enable-sysdeps ${{ inputs.debug && '--debug' || '' }}
 
         which cpan
+
+        echo "::group::install Slay::Makefile"
         # has to be patched
         cpan Slay::Makefile
 
-        slaymake -d install-prereqs-with-cpan
+        echo "::group::preinstall sysdeps"
+        slaymake -d preinstall-sysdeps
+
+        echo "::group::install CPAN prereqs"
+        #slaymake -d install-prereqs-with-cpan
+        #cpan $(slaymake echo-prereqs)
+        slaymake -d install-missing-prereqs-with-cpan
         echo completed slaymake run
+
+        echo "::group::test suite"
         slaymake -d test-t
+        echo "::group::compile test "
         slaymake -d test-compile
       if: "!startsWith(matrix.os,'windows-')"

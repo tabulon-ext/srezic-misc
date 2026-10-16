@@ -4,7 +4,7 @@
 #
 # Author: Slaven Rezic
 #
-# Copyright (C) 2007, 2008, 2009, 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020, 2022 Slaven Rezic. All rights reserved.
+# Copyright (C) 2007, 2008, 2009, 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020, 2022, 2024, 2025, 2026 Slaven Rezic. All rights reserved.
 # This program is free software; you can redistribute it and/or
 # modify it under the same terms as Perl itself.
 #
@@ -111,9 +111,10 @@ my $prefs_dir;
 my $signal_end = 1;
 my $module_printused;
 my $unkind = 0;
-my $mirror_url = 'http://cpan.cpantesters.org/';
-#my $mirror_url = 'http://cpan.metacpan.org/';
+#my $mirror_url = 'http://cpan.cpantesters.org/'; # XXX as of 2025-11-23 not working anymore
+my $mirror_url = 'http://cpan.metacpan.org/';
 my @hidemod;
+my @perl_envs;
 my $time_fake;
 my $use_vncserver;
 my $x11_display;
@@ -216,6 +217,7 @@ GetOptions("n" => \$n,
 	   'mirrorurlperl'  => sub { $mirror_url = 'http://www.perl.com/CPAN/' },
 	   'mirrorurldevelooper' => sub { $mirror_url = 'http://cpan.develooper.com/' },
 	   'mirrorurlmetacpan' => sub { $mirror_url = 'http://cpan.metacpan.org/' }, # contains also backpan
+	   'mirrorurlhttpsmetacpan' => sub { $mirror_url = 'https://cpan.metacpan.org/' }, # contains also backpan
 	   'mirrorurlfastftp|mirrorurlftpfast' => sub { $mirror_url = 'ftp://ftp.hawo.stw.uni-erlangen.de/CPAN' },
 	   'debug!' => \$debug,
 	   'pre=s@' => \@pre_dist_or_mods,
@@ -249,6 +251,7 @@ GetOptions("n" => \$n,
 	       }
 	   },
 	   'hidemod=s@' => \@hidemod,
+	   'perl-env=s@' => \@perl_envs,
 	   'timefake=s' => \$time_fake,
 	   'vnc!'  => \$use_vncserver,
 	   'x11display=s' => \$x11_display,
@@ -308,7 +311,7 @@ usage: $0
      [-[no]destroyperl]
      [-strace|-truss|-ktrace file] [-[no]typescript] [-filemon]
      [-[no]signalend] [-moduleprintused] [-hidemod A::B ...]
-     [-timefake options]
+     [-perl-env perl:VAR=VAL ...] [-timefake options]
      [-[no]distroprefs] [-prefsdir ...]
      [-[no]limits] [-vnc] [-x11display :...]
      [-minbuilddiravail bytes|...k|...M|...G|...%]
@@ -345,6 +348,12 @@ usage: $0
 -unkind:      disable the default to run with low priority
 -hidemod: use Devel::Hide to "hide" modules when building. A popular one is
           -hidemod "Test::Pod Test::Pod::Coverage"
+-perl-env: set environment variable for the given perl executable. The
+           perl part is resolved to its real absolute path and matched
+           against the real absolute path of the perl executable. If the
+           perl part is empty, then the environment variable is set for
+           all perls.
+           Example: -perl-env /usr/bin/perl:DEBUG=1 -perl-env :GLOBAL=1
 
 -n:  do not do anything, just show what would be done
 -debug: enable more debugging
@@ -444,8 +453,9 @@ TRY_TYPESCRIPT: {
 	my $typescript_day_dir = "$cpan_smoke_typescripts_dir/" . POSIX::strftime("%Y%m%d", localtime $now);
 	if (!-d $typescript_day_dir) {
 	    mkdir $typescript_day_dir;
+	    my $err = $!;
 	    if (!-d $typescript_day_dir) {
-		die "Can't create $typescript_day_dir: $!";
+		die "Can't create $typescript_day_dir: $err";
 	    }
 	}
 	$typescript_file = $typescript_day_dir . "/" . POSIX::strftime("%H%M%S", localtime) . ".typescript";
@@ -495,6 +505,10 @@ if (!@dist_or_mods) {
     die "dist or mod?";
 }
 
+######################################################################
+# Determine perls for testing
+
+# handle -pv option (either list of fixed versions -> @perls, or list of conditions -> @pv_conditions)
 my @pv_conditions;
 if (@pv) {
     my @remaining_pvs;
@@ -510,7 +524,30 @@ if (@pv) {
 	if (@pv_conditions) {
 	    die "Mixing conditional perl versions and fixed versions is not supported";
 	}
-	push @perls, map { "perl$_" } map { split /,/ } @remaining_pvs;
+	for my $pv (map { split /,/ } @remaining_pvs) {
+	    my $perl_base = "perl$pv";
+	    if ($^O eq 'freebsd') {
+		# Special handling for FreeBSD with respect to system perl: /usr/local/bin/perl5.X.Y may be the system
+		# perl; in this case this perl should be skipped (because the smoker user usually cannot install into
+		# the system perl installation) unless there's no self-compiled alternative in /usr/perl5.X.Y.
+		my $perl_path = "/usr/local/bin/$perl_base";
+		if (is_system_perl($perl_path)) {
+		    my $alternative = "/usr/perl$pv/bin/perl";
+		    if (-x $alternative) {
+			warn "NOTE: $perl_path (expanded from $pv) is the system perl, use $alternative as an alternative.\n";
+			push @perls, $alternative;
+			next;
+		    } else {
+			warn "NOTE: $perl_path (expanded from $pv) is the system perl and there is no alternative, skip this perl.\n";
+			next;
+		    }
+		}
+	    }
+	    push @perls, $perl_base;
+	}
+    }
+    if (!@perls && !@pv_conditions) {
+	die "*** ERROR: could not find any matching perl.\n";
     }
 }
 
@@ -523,26 +560,10 @@ if ($do_this_perl) {
     }
 }
 
+# No perls found? Use all available perls, maybe filtered by @pv_conditions.
 if (!@perls) {
     if ($all_perls) {
 	my @all_perl_defs;
-
-	my $system_perl; # if symlinked
-	my $system_perl_id; # if hardlinked, then use dev+ino for stat()
-	if ($^O eq 'freebsd') {
-	    my @candidates = ("/usr/local/bin/perl5", "/usr/local/bin/perl");
-	    for my $candidate (@candidates) {
-		if (-l $candidate) {
-		    $system_perl = readlink $candidate;
-		    last;
-		} else {
-		    if (my(@stat) = stat $candidate) {
-			$system_perl_id = join(",", @stat[0,1]);
-			last;
-		    }
-		}
-	    }
-	}
 
 	my @candidates;
 	if ($^O eq 'MSWin32') {
@@ -565,17 +586,7 @@ if (!@perls) {
 		next;
 	    }
 
-	    my $candidate_id = do {
-		if (my @stat = stat $candidate) {
-		    join(",", @stat[0,1]);
-		} else {
-		    undef;
-		}
-	    };
-	    if (
-		($system_perl && $candidate eq $system_perl) ||
-		($system_perl_id && $candidate_id && $candidate_id eq $system_perl_id)
-	       ) {
+	    if (is_system_perl($candidate)) {
 	    HANDLE_SYSTEM_PERL: {
 		    if ($^O eq 'freebsd' && $candidate =~ m{^/usr/local/bin/(.*)$}) {
 			my $alternative_perl = "/usr/$1/bin/perl";
@@ -670,6 +681,8 @@ if ($perlr) {
     @perls = reverse @perls;
 }
 
+######################################################################
+
 CPAN::HandleConfig->load;
 my $prefs_dir_is_changed;
 if ($prefs_dir) {
@@ -686,6 +699,9 @@ if ($reload_index) {
 	   ($use_sqlite ? '$CPAN::Config->{use_sqlite}=1; ' : '') .
 	   'CPAN::Index->force_reload');
 }
+
+######################################################################
+# Determine CPAN distributions for testing
 
 for (@dist_or_mods, @pre_dist_or_mods) {
     # to make it easy to copy'n'paste download URLs from a CPAN http mirror:
@@ -889,7 +905,10 @@ if ($r) {
     @dist_or_mods = reverse @dist_or_mods;
 }
 
+######################################################################
+
 my $has_private_tmpdir;
+my $used_tmpdir_root; # this is set only if -perdaybuilddir is active to the parent directory of the per-day dirs
 if ($my_tmpdir) {
     if (!-d $my_tmpdir) {
 	die "The defined temporary directory '$my_tmpdir' does not exist";
@@ -900,7 +919,7 @@ if ($my_tmpdir) {
 } else {
     my @tmpdir_defs = (
 		       # Directory      User-owned	Do a noexec check?
-		       (defined $ENV{XDG_RUNTIME_DIR} ? [$ENV{XDG_RUNTIME_DIR}, 1, 1] : ()),
+		       #(defined $ENV{XDG_RUNTIME_DIR} ? [$ENV{XDG_RUNTIME_DIR}, 1, 1] : ()), # do not use XDG_RUNTIME_DIR which usually points to a rather small partition /run/user/$uid
 		       ['/var/tmp',     0,             0],
 		       ['/tmp',         0,             0],
 		      );
@@ -930,6 +949,7 @@ if ($my_tmpdir) {
 	    }
 
 	    if ($per_day_build_dir) {
+		$used_tmpdir_root = $_another_tmp;
 		$_another_tmp .= '/' . per_day_directory_name();
 		if (!-d $_another_tmp) {
 		    mkdir $_another_tmp, $tmp_mode
@@ -1169,9 +1189,31 @@ EOF
     }
 
     my @dist_or_mods = @dist_or_mods;
+    my @pre_dist_or_mods = @pre_dist_or_mods;
 
     # Set PERL_CPAN_REPORTER_DIR if $prefix/.cpanreporterdir file exists
     local %ENV = %ENV; # local $ENV{PERL_CPAN_REPORTER_DIR} and a later local %ENV = %ENV seems to trigger a perl bug...
+    for my $perl_env (@perl_envs) {
+	if (my($target_perl, $key, $val) = $perl_env =~ m{^(.*):([^:=]+)=(.*)$}) {
+	    my $match;
+	    if ($target_perl eq '') {
+		$match = 1;
+	    } else {
+		require Cwd;
+		my $resolved_perl = Cwd::abs_path(is_in_path($perl));
+		my $resolved_target_perl = Cwd::abs_path(is_in_path($target_perl));
+		if (defined $resolved_perl && defined $resolved_target_perl && $resolved_perl eq $resolved_target_perl) {
+		    $match = 1;
+		}
+	    }
+	    if ($match) {
+		$ENV{$key} = $val;
+		warn "INFO: set $key=$val for $perl\n";
+	    }
+	} else {
+	    warn "WARN: Invalid -perl-env specification '$perl_env', expected perl:VAR=VAL\n";
+	}
+    }
     if ($PERL_CPAN_REPORTER_DIR) {
 	$ENV{PERL_CPAN_REPORTER_DIR} = $PERL_CPAN_REPORTER_DIR;
     } else {
@@ -1357,6 +1399,56 @@ EOF
 	}
     }
 
+    # Check for -pre module specifications "$modname>=$minversion"
+    # If such a module with minimum version is installed, then
+    # this entry is dropped.
+    {
+	my @test_module_versions;
+	for my $pre_mod (@pre_dist_or_mods) {
+	    if ($pre_mod =~ m{^(.*)>=(.*)$}) {
+		push @test_module_versions, [$1, $2];
+	    }
+	}
+	if (@test_module_versions) {
+	    open my $fh, '-|', $perl, '-MCPAN', '-e', <<'EOF', (map { @$_ } @test_module_versions) or die $!;
+use strict;
+use version;
+require ExtUtils::MakeMaker;
+$CPAN::Be_Silent=1;
+for(my $i=0; $i<=$#ARGV; $i+=2) {
+    my($mod, $modver) = @ARGV[$i,$i+1];
+    my $inst_file = eval { CPAN::Shell->expand("Module", $mod)->inst_file };
+    if ($inst_file) {
+        my $inst_version = MM->parse_version($inst_file);
+        if (defined $inst_version && version->parse($inst_version) >= version->parse($modver)) {
+            print $mod, "\n";
+        }
+    }
+}
+EOF
+	    my %mod_ver_installed;
+	    while(<$fh>) {
+		chomp;
+		$mod_ver_installed{$_} = 1;
+	    }
+	    close $fh
+		or die "Script running with $perl failed: $!";
+
+	    @pre_dist_or_mods = map {
+		if (my($mod) = $_ =~ /^(.*)>=(.*)/) {
+		    if ($mod_ver_installed{$1}) {
+			warn "INFO: drop module $1, version >= $2 already installed\n";
+			();
+		    } else {
+			$mod;
+		    }
+		} else {
+		    $_;
+		}
+	    } @pre_dist_or_mods;
+	}
+    }
+
     my $total_dists = scalar(@dist_or_mods) + scalar(@pre_dist_or_mods);
     my $dist_i = 0;
 
@@ -1422,7 +1514,7 @@ Please fix and retry with <RETURN>: "};
 **********************************************************************
 * WARNING
 * SlayMakefile exists in $prefs_dir, but slaymake is not available.
-* Please install Slay::Maker from CPAN.
+* Please install Slay::Makefile from CPAN.
 * Proceeding without validating and updating distroprefs.
 **********************************************************************
 EOF
@@ -1796,15 +1888,17 @@ END {
 	system @idletermchecker_cmd, "-tk", "-s", "-remove", $tty;
     }
 
-    if ($signal_end && time-$start_time>60 && is_in_path("tkmessage") && $^O ne 'darwin') {
+    if ($signal_end && time-$start_time>60) {
 	my $msg = "Smoking finished (";
 	$msg .= "dists=";
 	$msg .= @dist_or_mods > 3 ? join(", ", @dist_or_mods[0..2]) . " ..." : join(", ", @dist_or_mods);
 	$msg .= ", perls=" . join(", ", @perls);
 	$msg .= ")";
 	print STDERR $msg, "\n";
-	if (fork == 0) {
-	    exec("tkmessage", "-bg", "green", "-fg", "black", $msg);
+	if (($^O =~ m{^(linux|freebsd)$} && $ENV{DISPLAY}) && is_in_path("tkmessage") && $^O ne 'darwin') {
+	    if (fork == 0) {
+		exec("tkmessage", "-bg", "green", "-fg", "black", $msg);
+	    }
 	}
     }
 
@@ -2090,8 +2184,10 @@ EOF
     }
     if (_can_df()) {
 	check_disk_free_directory($build_dir, $min_build_dir_avail, $min_dir_inodes_percent, autoclean => 1, minbuilddircleanup => $min_build_dir_cleanup);
-	require File::Spec;
-	check_disk_free_directory(File::Spec->tmpdir, $min_tmp_dir_avail, $min_dir_inodes_percent, autoclean => 1);
+	if (defined $used_tmpdir_root) {
+	    require File::Spec;
+	    check_disk_free_directory($used_tmpdir_root, $min_tmp_dir_avail, $min_dir_inodes_percent, autoclean => 1);
+	}
     } else {
 	warn <<EOF;
 ***************************************************************************
@@ -2206,6 +2302,8 @@ sub check_disk_free_directory {
 
 	if ($autoclean && $per_day_build_dir) {
 	    require Time::Local;
+	    require File::Basename;
+	    require Cwd;
 	    my $oldest_directory;
 	    my $parent_dir = $dir;
 	    my $date_rx = qr{^(20\d{2})([012]\d)([0123]\d)([012]\d)?$};
@@ -2217,7 +2315,6 @@ sub check_disk_free_directory {
 		    push @clean_candidates, $entry;
 		}
 	    }
-
 	    if (@clean_candidates) {
 		# pick oldest one
 		my($entry) = sort @clean_candidates;
@@ -2249,6 +2346,15 @@ sub check_disk_free_directory {
 			last;
 		    } else {
 			warn "INFO: Remove now oldest build directory: $oldest_directory\n";
+			require File::Find;
+			File::Find::find(sub {
+					     return unless -d $_;
+					     unless (-x _) {
+						 warn "INFO: Need to fix directory permissions for $File::Find::name...\n";
+						 chmod 0700, $File::Find::name
+						     or warn "ERROR: Failed to chmod $File::Find::name: $!";
+					     }
+					 }, $oldest_directory);
 			rmtree($oldest_directory, 0, 0);
 			$last_remove_candidate = $oldest_directory;
 			next; # retry
@@ -2369,6 +2475,50 @@ sub normalize_bytes {
     $$varref =~ s{([\d\.]+)([kMG])}{int($1*($2 eq "k" ? 1024 : $2 eq "M" ? 1024**2 : $2 eq "G" ? 1024**3 : die))}e;
     if ($$varref !~ m{^\d+$}) {
 	die "(expanded) $name value '$$varref' does not look like an integer number";
+    }
+}
+
+{
+    my $init_done;
+    my $system_perl_path; # if symlinked
+    my $system_perl_id; # if hardlinked, then use dev+ino for stat()
+    sub _determine_system_perl_init () {
+	if (!$init_done) {
+	    my @candidates;
+	    if ($^O eq 'freebsd') {
+		@candidates = ("/usr/local/bin/perl5", "/usr/local/bin/perl");
+	    } elsif ($^O eq 'linux') {
+		@candidates = ('/usr/bin/perl');
+	    }
+	    for my $candidate (@candidates) {
+		if (-l $candidate) {
+		    $system_perl_path = readlink $candidate;
+		    last;
+		} else {
+		    if (my(@stat) = stat $candidate) {
+			$system_perl_id = join(",", @stat[0,1]);
+			last;
+		    }
+		}
+	    }
+	}
+	$init_done = 1;
+    }
+    sub is_system_perl {
+	my($path) = @_;
+	_determine_system_perl_init;
+	return 1 if $system_perl_path && $path eq $system_perl_path;
+	if ($system_perl_id) {
+	    my $file_id = do {
+		if (my @stat = stat $path) {
+		    join(",", @stat[0,1]);
+		} else {
+		    undef;
+		}
+	    };
+	    return 1 if $file_id && $file_id eq $system_perl_id;
+	}
+	return 0;
     }
 }
 
@@ -2666,6 +2816,15 @@ Set a specific seed value for C<PERL_HASH_SEED> and optionally a value
 for C<PERL_PERTURB_KEYS> (defaults to C<NO> if this option is used).
 Note that technically there's no C<PERL_PERTURB_KEYS=YES> in perl;
 it's just the absence of this environment variable.
+
+=item -perl-env I<perl>:I<VAR>=I<VAL>
+
+Set environment variable for the given perl executable. The I<perl>
+part is resolved to its real absolute path and matched against the
+real absolute path of the perl executable. If the I<perl> part is
+empty, then the environment variable is set for all perls. This option
+may be specified multiple times.
+Example: C<-perl-env /usr/bin/perl:DEBUG=1 -perl-env :GLOBAL=1>.
 
 =item -[no]failifnothingdone
 

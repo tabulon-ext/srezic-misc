@@ -1,0 +1,105 @@
+#!/usr/bin/perl
+# -*- perl -*-
+
+use if !$ENV{DOIT_IN_REMOTE}, lib => "$ENV{HOME}/src/Doit/lib";
+use Doit; # get from CPAN, or do "git clone git://github.com/eserte/doit.git ~/src/Doit"
+use Doit::Log;
+use Doit::Util qw(in_directory);
+use Getopt::Long;
+
+sub can_be_amended {
+    my($doit) = @_;
+    my $err;
+    my $upstream = eval { $doit->info_open3({quiet=>1, errref => \$err}, qw(git rev-parse --abbrev-ref --symbolic-full-name @{upstream})) };
+    chomp $upstream if defined $upstream;
+    if (!defined $upstream || $upstream eq '') {
+	info "Safe to amend: no known upstream.\n";
+	return 1;
+    }
+
+    if (eval { $doit->info_system({quiet=>1}, qw(git merge-base --is-ancestor HEAD), $upstream); 1 }) {
+	warning <<EOF;
+NOT safe to amend: HEAD is reachable from $upstream (it was pushed, or at least the remote-tracking branch contains it).
+Specify
+
+    $0 --skip-amend-check
+
+to bypass this check.
+EOF
+	return 0;
+    } else {
+	info "Safe to amend: HEAD is not reachable from $upstream.";
+	return 1;
+    }
+}
+
+return 1 if caller;
+
+sub y_or_n (;$);
+
+my $doit = Doit->init;
+
+GetOptions("skip-amend-check" => \my $skip_amend_check)
+    or die "usage?";
+
+$doit->add_component('git');
+
+@ARGV and error "No arguments expected";
+
+in_directory {
+    my @files = sort $doit->git_get_changed_files($Doit::Git::VERSION >= 0.026 ? ('ignore_untracked' => 1) : ());
+    if (!@files) {
+	info "No changed files";
+	exit;
+    }
+
+    if (!$skip_amend_check) {
+	if (!can_be_amended($doit)) {
+	    exit 1;
+	}
+    }
+
+    my %files_in_last_commit = map { ($_,1) } split /\n/, $doit->info_qx({quiet=>1}, qw(git diff-tree --no-commit-id --name-only -r HEAD --root));
+
+    my @changed_files_not_in_last_commit;
+    my @changed_files_in_last_commit = grep {
+	if ($files_in_last_commit{$_}) {
+	    1;
+	} else {
+	    push @changed_files_not_in_last_commit, $_;
+	    0;
+	}
+    } @files;
+    if (@changed_files_not_in_last_commit) {
+	warning "Some files were changed which are not in the last commit: @changed_files_not_in_last_commit.\nContinue with amending just @changed_files_in_last_commit (y/n)?";
+	if (!y_or_n) {
+	    error "Aborting.";
+	}
+    }
+
+    $doit->system('git', 'add', @changed_files_in_last_commit);
+    $doit->system('git', 'commit', '--amend', '--no-edit');
+} $doit->git_root;
+
+# REPO BEGIN
+# REPO NAME y_or_n /home/e/eserte/src/srezic-repository 
+# REPO MD5 146cfcf8f954555fe0117a55b0ddc9b1
+sub y_or_n (;$) {
+    my $default = shift;
+    while () {
+        chomp(my $yn = <STDIN>);
+	if ($yn eq '' && defined $default) {
+	    $yn = $default;
+	}
+        if (lc $yn eq 'y') {
+            return 1;
+        } elsif (lc $yn eq 'n') {
+	    return 0;
+        } else {
+            print STDERR "Please answer y or n: ";
+        }
+    }
+}
+# REPO END
+
+__END__

@@ -4,7 +4,7 @@
 #
 # Author: Slaven Rezic
 #
-# Copyright (C) 2008-2010,2012,2013,2014,2015,2016,2017,2018,2019,2020,2021,2022 Slaven Rezic. All rights reserved.
+# Copyright (C) 2008-2010,2012,2013,2014,2015,2016,2017,2018,2019,2020,2021,2022,2023,2024,2025,2026 Slaven Rezic. All rights reserved.
 # This program is free software; you can redistribute it and/or
 # modify it under the same terms as Perl itself.
 #
@@ -39,17 +39,15 @@ sub sort_by_example ($@);
 use constant USE_BETA_MATRIX => 0;
 
 my @current_beforemaintrelease_pairs = ( # remember: put a space before "RC", not a dash
-					{ pair => '5.36.0:5.37.5',     important => 1 },
-					{ pair => '5.37.4:5.37.5',     important => 1 },
-					{ pair => '5.34.1:5.36.0',     important => 1 },
-					{ pair => '5.34.0:5.34.1',     important => 1 },
-					{ pair => '5.32.1:5.34.0',     important => 0 },
-					{ pair => '5.32.0:5.32.1',     important => 0 },
-					{ pair => '5.30.3:5.32.0',     important => 0 },
-					{ pair => '5.30.2:5.30.3',     important => 0 },
-					{ pair => '5.28.2:5.30.3',     important => 0 },
-					{ pair => '5.28.1:5.28.2',     important => 0 },
-					{ pair => '5.26.3:5.28.2',     important => 0 },
+					{ pair => '5.40.0:5.41.12',    important => 1 },
+					{ pair => '5.41.10:5.41.12',   important => 1 },
+					{ pair => '5.38.2:5.40.0',     important => 1 },
+					{ pair => '5.36.3:5.38.2',     important => 1 },
+					{ pair => '5.34.3:5.36.3',     important => 1 },
+					{ pair => '5.32.1:5.34.3',     important => 0 },
+					{ pair => '5.30.3:5.32.1',     important => 0 },
+					{ pair => '5.28.3:5.30.3',     important => 0 },
+					{ pair => '5.26.3:5.28.3',     important => 0 },
 				       );
 
 # Patterns for report analysis
@@ -81,6 +79,7 @@ my $reversed;
 my $geometry;
 my $quit_at_end = 1;
 my $do_xterm_title = 1;
+my $prog_name = "ctr_good_or_invalid";
 my $show_recent_states = 1;
 my $use_recent_states_cache = 0;
 my $recent_months = 1;
@@ -93,6 +92,7 @@ my @match_pvs;
 my $only_recent;
 my $display_os_analysis = 'os_version'; # or 'os'
 my $report_encoding = 'utf8'; # 'Guess'; use Encode::Guess qw/iso-8859-1 utf8 ascii/;
+my $prefs_dir = "$ENV{HOME}/.cpan/prefs"; # XXX assume the default, robust code would need to lookup in CPAN config
 
 GetOptions("good" => \$only_good,
 	   "auto-good!" => \$auto_good,
@@ -110,6 +110,7 @@ GetOptions("good" => \$only_good,
 	   "geometry=s" => \$geometry,
 	   "quit-at-end!" => \$quit_at_end,
 	   "xterm-title!" => \$do_xterm_title,
+	   "prog-name=s" => \$prog_name,
 	   "recent-states!" => \$show_recent_states,
 	   "recent-states-cache!" => \$use_recent_states_cache,
 	   "recent-months=s" => \$recent_months,
@@ -120,14 +121,14 @@ GetOptions("good" => \$only_good,
 	   'fast-forward' => \$fast_forward,
 	   'match-pv=s@' => \@match_pvs,
 	   'only-recent=s' => \$only_recent,
-	   'fast-matrix-url=s' => \my $fast_matrix_url,
+	   'fast-matrix-url=s@' => \my @fast_matrix_urls,
 	  )
     or die <<EOF;
 usage: $0 [-good] [-[no]auto-good] [-sort date] [-r] [-geometry x11geom]
-          [-noquit-at-end] [-[no]xterm-title]
+          [-noquit-at-end] [-[no]xterm-title] [-prog-name ...]
           [-[no]recent-states] [-[no]check-screesaver] [-show-only]
           [-match-pv opperlver ...] [-only-recent period]
-          [-fast-matrix-url rooturl]
+          [-fast-matrix-url rooturl ...]
           [directory [file ...]]
 EOF
 
@@ -136,9 +137,11 @@ my $reportdir = shift || "$ENV{HOME}/var/cpansmoker";
 return 1 if caller(); # for modulino-style testing
 
 my($distvname2annotation, $distname2annotation);
-if (@annotate_files) {
-    ($distvname2annotation, $distname2annotation) = read_annotate_txt(@annotate_files);
-}
+my %annotate_files_mtime;
+do_read_annotate_files();
+
+my $distname2prefs = get_list_of_cpan_prefs();
+
 my $rtticket_to_title;
 if (0 && @annotate_files) {
     $rtticket_to_title = read_rt_information(); # old GNUS hack, not used anymore
@@ -288,6 +291,7 @@ if (@match_pvs) {
 		    or die "ERROR: can't open file $file: $!\n";
 	    CHECK_VERSION: {
 		    while(<$fh>) {
+			s/\r//; # for windows reports
 			last if /^$/;
 			if (/^X-Test-Reporter-Perl:\s+v([\d\.]+)/) { # XXX RCs?
 			    my $this_pv = version->new($1);
@@ -326,6 +330,7 @@ if ($only_recent) {
 	    or die "ERROR: can't open file $file: $!\n";
     CHECK_DIST: {
 	    while(<$fh>) {
+		s/\r//; # for windows reports
 		last if /^$/;
 		if (/^X-Test-Reporter-Distfile:\s+(.+)/) {
 		    if ($is_recent{$1}) {
@@ -394,9 +399,9 @@ my $currfile_i = 0;
 my $currfile_st = '';
 my $currfile;
 my($currdist, $currversion);
-my $modtime;
 my $following_dists_text;
 
+my $modtime_l;
 my $prev_b;
 my $next_b;
 my $good_b;
@@ -406,7 +411,7 @@ my $more = $mw->Scrolled("More")->pack(-fill => "both", -expand => 1);
 {
     my $f = $mw->Frame->pack(-fill => "x");
     $f->Label(-text => "Report created:")->pack(-side => "left");
-    $f->Label(-textvariable => \$modtime)->pack(-side => "left");
+    $modtime_l = $f->Label(-text => '...')->pack(-side => "left");
     $f->Label(-textvariable => \$following_dists_text)->pack(-side => "left");
     $all_good_b = $f->Button(-padx => 0, -pady => 0, -borderwidth => 1, -state => 'disabled', -text => "All good")->pack(-side => "left");
 
@@ -471,8 +476,10 @@ my $more = $mw->Scrolled("More")->pack(-fill => "both", -expand => 1);
 		       -image => $images{metacpan},
 		       -width => 24,
 		       -command => sub {
+			   #my $url = "https://www.metacpan.org/release/$currdist";
+			   my $url = "https://www.metacpan.org/dist/$currdist";
 			   require Tk::Pod::WWWBrowser;
-			   Tk::Pod::WWWBrowser::start_browser("http://www.metacpan.org/release/$currdist");
+			   Tk::Pod::WWWBrowser::start_browser($url);
 		       })->pack(-side => 'left', -fill => 'y');
 	$balloon->attach($mc_b, -msg => 'MetaCPAN');
     }
@@ -494,20 +501,25 @@ my $more = $mw->Scrolled("More")->pack(-fill => "both", -expand => 1);
 		       -width => 24,
 		       -command => sub {
 			   require Tk::Pod::WWWBrowser;
-			   Tk::Pod::WWWBrowser::start_browser("http://" . (USE_BETA_MATRIX ? 'beta-' : '') . "matrix.cpantesters.org/?" . make_query_string(dist=>$currdist));
+			   Tk::Pod::WWWBrowser::start_browser("http://" . (USE_BETA_MATRIX ? 'beta-' : '') . "matrix.cpantesters.org/?" . make_query_string(dist=>"$currdist $currversion"));
 		       })->pack(-side => 'left', -fill => 'y');
 	$balloon->attach($matrix_b, -msg => 'Matrix');
     }
-    if ($fast_matrix_url) {
-	my $fast_matrix_b =
-	    $f->Button(-text => 'Fast Matrix',
-		       -image => $images{matrix},
-		       -width => 24,
-		       -command => sub {
-			   require Tk::Pod::WWWBrowser;
-			   Tk::Pod::WWWBrowser::start_browser("$fast_matrix_url?" . make_query_string(dist=>$currdist));
-		       })->pack(-side => 'left', -fill => 'y');
-	$balloon->attach($fast_matrix_b, -msg => 'Fast Matrix');
+    if (@fast_matrix_urls) {
+	my $i = 0;
+	for my $fast_matrix_url (@fast_matrix_urls) {
+	    $i++;
+	    my $label = 'Fast Matrix' . (@fast_matrix_urls > 1 ? "($i)" : "");
+	    my $fast_matrix_b =
+		$f->Button(-text => $label,
+			   -image => $images{matrix},
+			   -width => 24,
+			   -command => sub {
+			       require Tk::Pod::WWWBrowser;
+			       Tk::Pod::WWWBrowser::start_browser("$fast_matrix_url?" . make_query_string(dist=>"$currdist $currversion"));
+			   })->pack(-side => 'left', -fill => 'y');
+	    $balloon->attach($fast_matrix_b, -msg => $label);
+	}
     }
     {
 	# XXX should this be enabled by option? what about the directory?
@@ -569,7 +581,7 @@ my $more = $mw->Scrolled("More")->pack(-fill => "both", -expand => 1);
 			$mw->SelectionHandle; # calling this mysteriously solves the closure problem...
 			$mw->SelectionHandle(sub {
 						 my $text = basename $currfile;
-						 $text =~ s{(?:amd64-freebsd|x86_64-linux).*}{};
+						 $text =~ s{(?:(?:amd64|arm64|aarch64)-freebsd|x86_64-linux).*}{};
 						 $text = q{"} . $text . qq{\n};
 						 return $text;
 					     });
@@ -585,6 +597,7 @@ $mw->bind("<Print>" => sub {
     require Tk::WidgetDump;
     $mw->WidgetDump;
 });
+$mw->bind('<P>'         => sub { start_ptksh() });
 for my $key ('F4', 'M-Left') {
     $mw->bind("<$key>" => sub { $prev_b->invoke });
 }
@@ -599,6 +612,45 @@ if ($auto_good) {
 			$mw->destroy;
 		    }
 		})
+}
+
+{
+    # cd .../CPAN-Testers-Matrix
+    # convert images/cpantesters_favicon.ico png:- | base64
+    my $icon_data = <<EOF;
+iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAMAAAAoLQ9TAAAABGdBTUEAALGPC/xhBQAAACBjSFJN
+AAB6JgAAgIQAAPoAAACA6AAAdTAAAOpgAAA6mAAAF3CculE8AAAAP1BMVEUAAAD/AAAAgQDMzMxm
+ZplmZmaQGzesNzfHUlLjbm4zM2asN1KZmZn///+Zmcw3clIbVjdSjVJuqW6KxYo3cjeuaZfnAAAA
+A3RSTlMAdXWIUczeAAAAAWJLR0QN9rRh9QAAAAd0SU1FB+kBGQgJL5nuBucAAACNSURBVBjTLY6B
+EoQgCERJwDrCJOv/v/UWDZ2R92ZFiVAsWut+/DZUsphZzTqWSF6inikmW92/DPFk289lthkQUWGZ
+UadkN9fWxBU9hLJd6q01y+sQ7ugYwi+ZAscSF8YI9eh3jBhPJhRDRwB7vyHUzZhKj7djPS3fdaJS
+3gjs8PwApUAm6+MUZaRS5+Q/AzAIn3BWLJgAAAAldEVYdGRhdGU6Y3JlYXRlADIwMjUtMDEtMjVU
+MDg6MDk6NDcrMDE6MDBh1fMNAAAAJXRFWHRkYXRlOm1vZGlmeQAyMDI1LTAxLTI1VDA4OjA5OjQ3
+KzAxOjAwEIhLsQAAAABJRU5ErkJggg==
+EOF
+    my $icon = $mw->Photo(
+	-format => 'png',
+	-data => $icon_data,
+    );
+    $mw->Icon(-image => $icon);
+
+    if (eval { require Tk::FreeDesktop::Wm; 1 }) {
+	if (!eval {
+	    require File::Temp;
+	    require MIME::Base64;
+	    my($tmpfh,$tmpfile) = File::Temp::tempfile(SUFFIX => '.png', TMPDIR => 1, UNLINK => 1);
+	    $tmpfh->print(MIME::Base64::decode_base64($icon_data));
+	    $tmpfh->close;
+
+	    my $fd = Tk::FreeDesktop::Wm->new(mw => $mw);
+	    my @image_files = ($tmpfile);
+	    $fd->set_wm_icon([ @image_files ]);
+
+	    1;
+	}) {
+	    warn "WARNING: Failed while using Tk::FreeDesktop::Wm to set icon: $@";
+	}
+    }
 }
 
 #$mw->FullScreen; # does not work (with fvwm2 only?)
@@ -724,6 +776,25 @@ sub parse_test_report {
 			 /^(?:#\s+Error:\s+)?(?:Smartmatch|given|when) is experimental $at_source_qr$/
 			) {
 		    $add_analysis_tag->('smartmatch');
+		} elsif ( # got: 'syntax error at /home/cpansand/.cpan/build/2024101423/App-HTTP_Proxy_IMP-0.958-0/blib/lib/App/HTTP_Proxy_IMP/IMP.pm line 91, near "$_ ~"
+		         /syntax error at .*near .*~"/
+			) {
+		    $add_analysis_tag->('smartmatch removal');
+		} elsif ( # Feature "switch" is not supported by Perl 5.41.4 at /home/cpansand/.cpan/build/2024101501/AnyEvent-Net-Curl-Queued-0.049-0/blib/lib/AnyEvent/Net/Curl/Queued/Easy.pm line 5.
+		         /\QFeature "switch" is not supported by Perl 5/
+		        ) {
+		    $add_analysis_tag->('switch removal');
+		} elsif ( # Error:  syntax error at /home/cpansand/.cpan/build/2024101508/REST-Neo4p-0.4003-0/blib/lib/REST/Neo4p/Agent.pm line 214, near ") {"
+		          # Error:  syntax error at /home/cpansand/.cpan/build/2024101510/Tapper-Installer-5.0.1-0/blib/lib/Tapper/Installer/Base.pm line 221, near "){"
+		         /syntax error at .*, near \"\)\s*\{\"/ ||
+			  # # 255 - Bareword found where operator expected (Missing operator before "when"?) at bin/compare-code line 335, near "'CSV'  when"
+			 /\QBareword found where operator expected (Missing operator before "when"?)/
+		        ) {
+		    $add_analysis_tag->('possibly switch removal');
+		} elsif ( #     Error:  Changing use VERSION while another use VERSION is in scope is deprecated, and will become fatal in Perl 5.44 at /home/cpansand/.cpan/build/2024101720/XML-Simple-Sugar-v1.1.2-1/blib/lib/XML/Simple/Sugar.pm line 5.
+		         /Changing use VERSION while another use VERSION is in scope is deprecated/
+		        ) {
+		    $add_analysis_tag->('changing use VERSION');
 		} elsif (
 			 /^(?:#\s+Error:\s+)?(?:push|pop|keys|values|shift|unshift|splice|each) on reference is experimental $at_source_qr$/
 			) {
@@ -756,6 +827,24 @@ sub parse_test_report {
 			 /sys(read|write)\(\) isn't allowed on :utf8 handles/
 			) {
 		    $add_analysis_tag->('sysread+syswrite on utf8');
+		} elsif ( # Array found where operator expected at /home/cpansand/.cpan/build/2024101323/List-Stream-0.0.1-0/blib/lib/List/Stream.pm line 90, near "->@*"
+		         /Array found where operator expected at .*near \"->\@\*\"/ ||
+			  #     Error:  syntax error at /home/cpansand/.cpan/build/2024101401/List-Stream-0.0.1-0/blib/lib/List/Stream.pm line 90, near "->@* "
+			 /syntax error at .*near \"->\@\*/
+		        ) {
+		    $add_analysis_tag->('postfix deref');
+		} elsif ( # Warning was 'Possible precedence problem between ! and string eq at /opt/perl-5.41.4/lib/site_perl/5.41.4/BSON.pm line 99.'
+		         /Possible precedence problem between ! and /
+		        ) {
+		    $add_analysis_tag->('possible precedence problem');
+		} elsif (
+		         /\QCan't find string terminator "'" anywhere before EOF at /
+		        ) {
+		    $add_analysis_tag->('old package separator');
+		} elsif ( # Attempt to call undefined import method with arguments ("humanize") via package "Protocol::FIX" (Perhaps you forgot to load the package?) at /home/cpansand/.cpan/build/2024101319/Protocol-FIX-0.08-0/blib/lib/Protocol/FIX/Parser.pm line 7.
+		         /\QAttempt to call undefined import method with arguments/
+		        ) {
+		    $add_analysis_tag->('undefined import method');
 		} elsif ( # should be before pod coverage and maybe pod tests
 			 /Unrecognized character .* at \._\S+ line \d+\./ ||
 			 /^#\s+Failed test 'Pod coverage on [A-Za-z0-9:_]*?\._[A-Za-z0-9:_]+'/
@@ -929,15 +1018,20 @@ sub parse_test_report {
 			) {
 		    $add_analysis_tag->('old c++ compiler');
 		} elsif (
-			 /^\s*(#\s+Error:\s+)?Can't load '.*?\.so' for module .*: Undefined symbol ".*?" $at_source_qr/ || # freebsd variant
-			 /^\s*(#\s+Error:\s+)?Can't load '.*?\.so' for module .*: .*?\.so: undefined symbol: \S+ $at_source_qr/ || # linux variant
-			 /^\s*(#\s+Error:\s+)?Can't load '.*?\.so' for module .*: .*?\.so(?:\.\d+)?: perl: fatal: relocation error: .*: referenced symbol not found $at_source_qr/ # solaris variant
+			 /^\s*(#\s+Error:\s+|#\s+)?Can't load '.*?\.so' for module .*: Undefined symbol ".*?" $at_source_qr/ || # freebsd variant
+			 /^\s*(#\s+Error:\s+|#\s+)?Can't load '.*?\.so' for module .*: .*?\.so: undefined symbol: \S+ $at_source_qr/ || # linux variant
+			 /^\s*(#\s+Error:\s+|#\s+)?Can't load '.*?\.so' for module .*: .*?\.so(?:\.\d+)?: perl: fatal: relocation error: .*: referenced symbol not found $at_source_qr/ # solaris variant
 			) {
 		    $add_analysis_tag->('undefined symbol in shared lib');
+		} elsif (/\bdl_load_file failed: .*\.so: undefined symbol: .* $at_source_qr/ # seen with XS::JIT
+			) {
+		    $add_analysis_tag->('undefined symbol');
 		} elsif (
 			 /^collect2: error: ld returned 1 exit status/ ||
 			 m{^/usr/bin/ld: [^:]+: relocation R_X86_64_32 against `a local symbol' can not be used when making a shared object; recompile with -fPIC} ||
-			 /^.*\.a\(.*\.o\):.*: undefined reference to `.*'/ # g++/windows/strawberry perl
+			 /^.*\.a\(.*\.o\):.*: undefined reference to `.*'/ || # g++/windows/strawberry perl
+		         /ld: error: undefined hidden symbol: / || # clang freebsd
+			 m{\bld: \S+\.so: hidden symbol `.*' isn't defined} # gcc linux
 			) {
 		    $add_analysis_tag->('linker error');
 		} elsif (
@@ -973,7 +1067,8 @@ sub parse_test_report {
 			 m{\QCan't locate YAML/Base.pm in @INC (you may need to install the YAML::Base module) (@INC contains: \E.*\Q/inc/YAML.pm line \E\d+} ||
 			 m{\QRegexp modifiers "/a" and "/d" are mutually exclusive at inc/Module/Install/AutoInstall.pm} ||
 			 m{\QBEGIN failed--compilation aborted at inc/Module/Install/Makefile.pm line \Q\d+\.} ||
-			 m{\QRedundant argument in sprintf at inc/Spiffy.pm line 225.}
+			 m{\QRedundant argument in sprintf at inc/Spiffy.pm line 225.} ||
+			 m{\QString found where operator expected\E.+\QTest/More.pm line \E\d+\Q, near } # old package separator removal in 5.41.x
 			) {
 		    $add_analysis_tag->('possibly old bundled modules');
 		} elsif (
@@ -1158,7 +1253,10 @@ sub parse_test_report {
 		    $add_analysis_tag->('panic extend/stack_grow');
 		} elsif (
 			 m{^"Makefile", line \d+: Need an operator$} || # FreeBSD 9
-			 m{^make(\[\d+\])?: ".*Makefile" line \d+: Need an operator$} # FreeBSD 10
+			 m{^make(\[\d+\])?: ".*[mM]akefile" line \d+: Need an operator$} || # FreeBSD 10
+		         m{^make(\[\d+\])?: ".*[mM]akefile" line \d+: Invalid line type$} || # FreeBSD 13
+			 m{^make(\[\d+\])?: ".*[mM]akefile" line \d+: Invalid line '.*', expanded to '.*'} || # FreeBSD 15
+			 m{^make(\[\d+\])?: .*[mM]akefile:\d+: Invalid line ".*", expanded to ".* "} # alternative diagnostics or newer BSD make (seen with FreeBSD 13..16)
 			) {
 		    $add_analysis_tag->('GNU make required');
 		} elsif (
@@ -1200,10 +1298,18 @@ sub parse_test_report {
 			 m{^Makefile:\d+: recipe for target '(.*?)' failed$} && $1 !~ m{^(?:test|test_dynamic|all)$}
 			) {
 		    $add_analysis_tag->('make problem (failed target)');
-		} elsif(
-			m{^CMake Error}
-		       ) {
+		} elsif (
+			 m{^CMake Error}
+		        ) {
 		    $add_analysis_tag->('cmake problem');
+		} elsif (
+			 m{\bcmake: not found\b}
+		        ) {
+		    $add_analysis_tag->('cmake missing');
+		} elsif (
+		        m{^You tried to plan twice at }
+		        ) {
+		    $add_analysis_tag->('plan twice');
 		} elsif (
 			 /^\QBailout called.  Further testing stopped:/
 			) {
@@ -1222,13 +1328,21 @@ sub parse_test_report {
 			 /Fatal error: .*: No space left on device/ # from gcc
 		         || /\branlib: .*: No space left on device/ # from ranlib; seen in Alien::ffmpeg
 			 || /\bar: .*: No space left on device/ # from ar; seen in Alien::ffmpeg
+			 || /\bcp: .*: No space left on device/ # from cp; seen in DBD::SQLite
 			 || /ERROR: .*: No space left on device/ # from EUMM
 			 || /mkdir .*: No space left on device $at_source_qr/ # from EU::Command
 			 || m{/usr/bin/ld:.*: No space left on device} # seen in Alien::MuPDF
 			 || /fatal error: error writing to .*: No space left on device/ # seen in Alien::ffmpeg
+			 || /fatal error: cannot write .*: No space left on device/ # seen in Alien-wxWidgets
 		         || /\binstall: error writing .*: No space left on device/ # from install; seen in Alien::ffmpeg
 			 || /\Qout of disk space?/ # seen in Gtk2 test suite
 			 || m{can't copy.*: No space left on device}i # seen in a Module::Build::Base using module; also in Slovo-Plugin-Prodan
+		         || /\bcp: error copying .* to .*: No space left on device/ # seen in Kephra
+		         || /\bcp: error writing '.*': No space left on device/
+		         || /\bcp: cannot create directory .*: No space left on device/ # seen in Alien-Libtensorflow
+			 || m{Error close on '.*': No space left on device} # seen during an alien build of Alien-Boost-Headers
+			 || m{\QError in tempdir() using \E.*: Could not create directory .*: No space left on device} # seen in Alien-Nodejs
+			 || m{^\s+No space left on device \(os error \d+\)} # seen in Alien-Rust
 			) {
 		    $add_analysis_tag->('!!!no space left on device!!!');
 		} elsif (
@@ -1245,6 +1359,10 @@ sub parse_test_report {
 		    if ($signal != 0) {
 			$signalled{$testfile} = $signal;
 		    }
+		} elsif (
+		         m{\Qpanic: MUTEX_LOCK (22) [Magic.xs:525] during global destruction\E}
+		        ) {
+		    $add_analysis_tag->('!!!freebsd perl bug!!!'); # https://bugs.freebsd.org/bugzilla/show_bug.cgi?id=287302
 		} else {
 		    # collect PROGRAM OUTPUT string (maybe)
 		    if (!$program_output->{skip_collector}) {
@@ -1279,6 +1397,8 @@ sub parse_test_report {
 		    }
 		} elsif (/\b(Mojolicious|Mojo::Base)\b/) {
 		    $add_analysis_tag->('mojolicious');
+		} elsif (/^\s*(Test::(?:Pod|Pod::Coverage|Perl::Critic|Signature|Prereq|Kwalitee))\s+\S+\s+(\S+)/) { # scenarios handled in cpan_smoke_modules_wrapper3 and should be skipped if the prereq is mentioned
+		    $prereq_versions{$1} = $2;
 		}
 	    } elsif ($section eq 'ENVIRONMENT') {
 		if (m{^\s+PERL5LIB = (.*)}) {
@@ -1329,6 +1449,7 @@ sub parse_test_report {
 		    elsif (($signal == 10 && $currarchname =~ m{freebsd|darwin}) ||
 			   ($signal ==  7 && $currarchname =~ m{linux})) { $signal = 'BUS' }
 		    elsif ($signal == 4)  { $signal = 'ILL' }
+		    elsif ($signal == 5)  { $signal = 'TRAP' }
 
 		    my $line_number = $testfile_to_linenumber{$testfile};
 		    if (!$line_number) {
@@ -1396,13 +1517,16 @@ sub get_annotation_info {
     my($fulldist) = @_;
     my($dist, $version) = parse_distvname($fulldist);
 
-    my($annotation_text, $annotation_label);
+    my($annotation_text, $annotation_label, $annotation_file, $annotation_linenumber, $old_annotation_record);
     if ($distvname2annotation && $distvname2annotation->{$fulldist}) {
 	$annotation_text = $distvname2annotation->{$fulldist};
 	$annotation_label = 'Annotation';
     } elsif ($distname2annotation && $distname2annotation->{$dist}) {
-	$annotation_text = $distname2annotation->{$dist}->{annotation} . ' (version ' . $distname2annotation->{$dist}->{version} . ')';
+	$old_annotation_record = $distname2annotation->{$dist};
+	$annotation_text = $old_annotation_record->{annotation};
 	$annotation_label = 'Old Annotation';
+	$annotation_file = $old_annotation_record->{file};
+	$annotation_linenumber = $old_annotation_record->{linenumber};
     }
     if (defined $annotation_text) {
 	my @annotations = split /, ?/, $annotation_text; # annotation may be a comma-separated list ...
@@ -1433,18 +1557,40 @@ sub get_annotation_info {
 			$annotation .= " ($subject)";
 			$changed = 1;
 		    }
-		} elsif ($annotation =~ m{(http\S+/github.com/\S+/issues/\S+)}) {
+		} elsif ($annotation =~ m{(http\S+/github.com/\S+/(?:issues|pull)/\S+)}) {
 		    my $title = get_cached_github_issue_title($1);
 		    if (defined $title) {
 			$annotation .= " ($title)";
 			$changed = 1;
 		    }
-		} elsif ($annotation =~ m{(http\S+/gitlab.com/\S+/issues/\S+)}) {
+		} elsif ($annotation =~ m{(http\S+/(?:gitlab.com|gitlab.ow2.org)/\S+/(?:issues|work_items)/\S+)}) {
 		    my $title = get_cached_gitlab_issue_title($1);
 		    if (defined $title) {
 			$annotation .= " ($title)";
 			$changed = 1;
 		    }
+		} elsif ($annotation =~ m{(https://bitbucket.org/.*/issues/\S+)}) {
+		    my $title = get_cached_bitbucket_issue_title($1);
+		    if (defined $title) {
+			$annotation .= " ($title)";
+			$changed = 1;
+		    }
+		} elsif ($annotation =~ m{(https://codeberg.org/.*/(issues|pull)/\S+)}) {
+		    my $title = get_cached_codeberg_issue_title($1);
+		    if (defined $title) {
+			$annotation .= " ($title)";
+			$changed = 1;
+		    }
+		} elsif ($annotation =~ m{(https://trac\.\S+)}) {
+		    my $title = get_cached_trac_issue_title($1);
+		    if (defined $title) {
+			$annotation .= " ($title)";
+			$changed = 1;
+		    }
+		}
+		if ($old_annotation_record) {
+		    $annotation .= ' (version ' . $old_annotation_record->{version} . ')';
+		    $changed =1;
 		}
 	    }
 	    if ($changed) {
@@ -1455,12 +1601,16 @@ sub get_annotation_info {
 		label => $annotation_label,
 		text  => $annotation_text,
 		url   => $url,
+		file  => $annotation_file,
+		linenumber => $annotation_linenumber,
 	       );
     }
     ();
 }
 
 sub set_currfile {
+    clear_ui();
+
     $currfile = $files[$currfile_i];
     $mw->title("Loading " . basename($currfile) . "...");
     $currfile_st = $currfile_i + 1;
@@ -1475,7 +1625,7 @@ sub set_currfile {
     if ($parsed_report->{error}) {
 	$mw->messageBox(-icon => 'error', -message => "Can't open $currfile: $parsed_report->{error}");
 	warn "Can't open $currfile: $!";
-	$modtime = "N/A";
+	set_modtime_l(undef);
 	return;
     }
 
@@ -1490,20 +1640,21 @@ sub set_currfile {
     my $curr_state;
     (my $curr_short_version = $x_test_reporter_perl) =~ s{^v}{}; # e.g. 5.10.0, without a leading "v"
 
-    my $title = "ctr_good_or_invalid:";
+    my $title;
     if ($subject) {
-	$title =  " " . $subject;
+	$title = $subject;
 	if ($x_test_reporter_perl) {
 	    $title .= " (perl " . $x_test_reporter_perl . ")";
 	}
 	my $mw = $more->toplevel;
 	($curr_state) = $subject =~ m{^(\S+)};
 	$curr_state = lc $curr_state if defined $curr_state; # "fail", "pass" ...
+	$title .= " - $prog_name";
     } else {
-	$title = " (subject not parseable)";
+	$title = "$prog_name (subject not parseable)";
     }
 
-    $modtime = scalar localtime ((stat($currfile))[9]);
+    set_modtime_l((stat($currfile))[9]);
 
     {
 	# fill "$following_dists_text" label
@@ -1532,7 +1683,7 @@ sub set_currfile {
 	my $get_dist = sub {
 	    my $file = shift;
 	    (my $dist_os = $file) =~ s{.*/}{};
-	    $dist_os =~ s{\.(x86_64|amd64|i[3456]86|darwin-2level|darwin-thread-multi-2level).*}{};
+	    $dist_os =~ s{\.(x86_64|amd64|arm64|aarch64|i[3456]86|darwin-2level|darwin-thread-multi-2level).*}{};
 	    $dist_os;
 	};
 
@@ -1624,9 +1775,9 @@ sub set_currfile {
 			    $analysis_tag eq 'experimental functions on references are forbidden' ||
 			    $analysis_tag eq 'experimental functions on references'
 			   ) && $annotation_text_for_analysis =~ m{Experimental .* on scalar is now forbidden})
-		       || ($analysis_tag eq 'pod coverage test' && $annotation_text_for_analysis =~ m{pod coverage .*fail}i)
-		       || ($analysis_tag eq 'pod test' && $annotation_text_for_analysis =~ m{(pod test.*fail|pod (and|&) pod coverage .*test.*fail)}i)
-		       || ($analysis_tag eq 'perl critic' && $annotation_text_for_analysis =~ m{perl.*critic.*fail}i)
+		       || ($analysis_tag eq 'pod coverage test' && $annotation_text_for_analysis =~ m{pod coverage .*fail|pod.coverage\.t\b.*\bfail}i)
+		       || ($analysis_tag eq 'pod test' && $annotation_text_for_analysis =~ m{(pod test.*fail|pod (and|&) pod coverage .*test.*fail|pod\.t\b.*\bfail)}i)
+		       || ($analysis_tag eq 'perl critic' && $annotation_text_for_analysis =~ m{(perl.*critic.*fail|fail.*perl.*critic)}i)
 		       || ($analysis_tag eq 'prereq fail' && $annotation_text_for_analysis =~ m{(undeclared dependenc|is not installed|dependenc(y|ies) .*not declared|not declared .*dependenc(y|ies)|can't locate |not specified (in|as) configure_requires)}i)
 		       || ($analysis_tag eq 'prereq version fail' && $annotation_text_for_analysis =~ m{prereq.*version}i)
 		       || ($analysis_tag eq 'undefined symbol in shared lib' && $annotation_text_for_analysis =~ m{undefined symbol}i)
@@ -1634,9 +1785,14 @@ sub set_currfile {
 		       || ($analysis_tag eq 'Function::Parameters regression' && $annotation_text_for_analysis =~ m{Function::Parameters})
 		       || ($analysis_tag eq 'c compile error' && $annotation_text_for_analysis =~ m{(compilation|compile) (error|fail)}i)
 		       || ($analysis_tag eq 'out of memory' && $annotation_text_for_analysis =~ m{out of memory}i)
-		       || ($analysis_tag eq 'signal SEGV' && $annotation_text_for_analysis =~ m{(segmentation fault|segfault|\bSEGV\b)}i)
-		       || ($analysis_tag eq 'signal BUS' && $annotation_text_for_analysis =~ m{\bbus error\b}i)
+		       || ($analysis_tag eq 'signal SEGV' && $annotation_text_for_analysis =~ m{(segmentation fault|segfault|\bSEGV\b|\bSIGSEGV\b)}i)
+		       || ($analysis_tag eq 'signal BUS' && $annotation_text_for_analysis =~ m{\b(bus error|SIGBUS)\b}i)
 		       || ($analysis_tag eq 'signal ABRT' && $annotation_text_for_analysis =~ m{\b(SIGABRT|ABRT)\b})
+		       || ((
+			    $analysis_tag eq 'signal KILL' ||
+			    $analysis_tag eq 'very long runtime (>= 30 min)'
+			   ) && $annotation_text_for_analysis =~ m{\btest suite hangs\b}i)
+		       || ($analysis_tag eq 'signal TRAP' && $annotation_text_for_analysis =~ m{\b(SIGTRAP|TRAP)\b})
 		       || ($analysis_tag eq 'system perl used' && $annotation_text_for_analysis =~ m{system\s+perl}i)
 		       || ($analysis_tag eq 'code points over 0xFF' && $annotation_text_for_analysis =~ m{code.points.over.0xFF}i)
 		       || ($analysis_tag eq 'inherited AUTOLOAD forbidden' && $annotation_text_for_analysis =~ m{inherited AUTOLOAD.*(forbidden|no longer allowed)}i)
@@ -1644,7 +1800,7 @@ sub set_currfile {
 		       || ($analysis_tag eq 'bare << forbidden' && $annotation_text_for_analysis =~ m{\bbare\b.*<<.*\bforbidden\b})
 		       || ($analysis_tag eq 'non-positive $/' && $annotation_text_for_analysis =~ m{setting.*\$/.*reference.*forbidden}i)
 		       || ($analysis_tag eq 'max unicode code point' && $annotation_text_for_analysis =~ m{Use of code point .* is not allowed}i)
-		       || ($analysis_tag eq 'taint' && $annotation_text_for_analysis =~ m{\btaint\b}i)
+		       || ($analysis_tag eq 'taint' && $annotation_text_for_analysis =~ m{(\btaint\b|-T\s+switch\b)}i)
 		       || ($analysis_tag eq 'defined array' && $annotation_text_for_analysis =~ m{can't use.*defined.*\@array}i)
 		       || ($analysis_tag eq 'defined hash' && $annotation_text_for_analysis =~ m{defined\b.*\bhash})
 		       || ($analysis_tag eq 'ssl certificate problem' && $annotation_text_for_analysis =~ m{certificate\s+not\s+valid}i)
@@ -1652,6 +1808,10 @@ sub set_currfile {
 		       || ($analysis_tag eq 'possible file temp locking issue' && $annotation_text_for_analysis =~ m{database is locked}i)
 		       || ($analysis_tag eq 'sysread+syswrite on utf8' && $annotation_text_for_analysis =~ m{sys(read|write).*utf8}i)
 		       || ($analysis_tag eq 'LWP::Protocol::https missing' && $annotation_text_for_analysis =~ m{(LWP::Protocol::https|Protocol scheme 'https' is not supported)}i)
+		       || ($analysis_tag eq 'changing use VERSION' && $annotation_text_for_analysis =~ m{Changing use VERSION while another use VERSION is in scope is deprecated}i)
+		       || ($analysis_tag eq 'plan twice' && $annotation_text_for_analysis =~ m{plan twice}i)
+		       || (($analysis_tag eq 'switch removal' || $analysis_tag eq 'possibly switch removal') && $annotation_text_for_analysis =~ m{switch removal}i)
+		       || ($analysis_tag eq 'smartmatch removal' && $annotation_text_for_analysis =~ m{smartmatch removal}i)
 		       ### generic match
 		       || $annotation_text_for_analysis =~ m{\Q$analysis_tag}i
 		      );
@@ -1848,9 +2008,28 @@ sub set_currfile {
 			       'Test-Simple problem' => 'testsimple',
 			       'mojolicious' => 'mojolicious',
 			      );
+	# See also related regexp under condition $section eq 'PREREQUISITES'
+	# and related scenarios using _scenario_hidemod in cpan_smoke_modules_wrapper3
+	my %skip_scenario_on_module_prereq =
+	    (
+		'testpod' => 'Test::Pod',
+		'testpodcoverage' => 'Test::Pod::Coverage',
+		'testperlcritic' => 'Test::Perl::Critic',
+		'testsignature' => 'Test::Signature',
+		'testprereq' => 'Test::Prereq',
+		'testkwalitee' => 'Test::Kwalitee',
+	    );
 	my @scenarios = do {
 	    my %seen;
 	    grep { !$seen{$_}++ }
+	    grep {
+		my $prereq = $skip_scenario_on_module_prereq{$_};
+		if ($prereq && exists $parsed_report->{prereq_versions}->{$prereq}) {
+		    0;
+		} else {
+		    1;
+		}
+	    }
 	    map { exists $map_to_scenario{$_} ? $map_to_scenario{$_} : () }
 	    keys %analysis_tags
 	};
@@ -1904,19 +2083,52 @@ sub set_currfile {
     ($currdist, $currversion) = parse_distvname($currfulldist);
 
     {
-	my($url, $annotation_label, $annotation_text) = @annotation_info{qw(url label text)};
+	# Create annotation buttons
+	my($url, $annotation_label, $annotation_text, $annotation_file, $annotation_linenumber) = @annotation_info{qw(url label text file linenumber)};
+	my $f = $analysis_frame->Frame;
 	my $w;
 	if ($url) {
-	    $w = $analysis_frame->Button(-text => $annotation_label,
-					 -command => sub {
-					     require Tk::Pod::WWWBrowser;
-					     Tk::Pod::WWWBrowser::start_browser($url);
-					 })->pack;
+	    $w = $f->Button(-text => $annotation_label,
+			    @common_analysis_button_config,
+			    -bg => 'yellow',
+			    -command => sub {
+				require Tk::Pod::WWWBrowser;
+				Tk::Pod::WWWBrowser::start_browser($url);
+			    })->pack(-side => 'left');
 	} elsif (defined $annotation_label) {
-	    $w = $analysis_frame->Label(-text => $annotation_label)->pack;
+	    $w = $f->Label(-text => $annotation_label)->pack(-side => 'left');
 	}
 	if ($w) {
 	    $balloon->attach($w, -msg => $annotation_text);
+
+	    if (defined $annotation_file && defined $annotation_linenumber) {
+		my $eb = $f->Button(-text => "Edit",
+				    @common_analysis_button_config,
+				    -bg => 'yellow',
+				    -command => sub {
+					system('emacsclient', '-n', '+'.$annotation_linenumber, $annotation_file);
+				    })->pack(-side => 'left');
+		$balloon->attach($eb, -msg => "Edit $annotation_file:$annotation_linenumber");
+	    }
+	}
+
+	# Create distroprefs button
+	my $prefs_file = $distname2prefs->{$currdist};
+	if ($prefs_file) {
+	    my $w = $f->Button(
+		-text => 'Distroprefs',
+		@common_analysis_button_config,
+		-command => sub {
+		    system('emacsclient', '-n', "$prefs_dir/$prefs_file");
+		},
+	    )->pack(-side => 'left');
+	    $balloon->attach($w, -msg => "Edit/view $prefs_dir/$prefs_file");
+	}
+
+	if ($f->children) {
+	    $f->pack;
+	} else {
+	    $f->destroy; # never used...
 	}
     }
 
@@ -1958,6 +2170,32 @@ sub set_currfile {
 	warn "$delta $title...\n";
 	$next_b->invoke;
     }
+}
+
+# Unset some display elements, as set_currfile() may take long.
+sub clear_ui {
+    $distribution_age_l->configure(-text => '...', -fg => 'black');
+    set_modtime_l(undef);
+    $mw->update;
+}
+
+sub set_modtime_l {
+    my $modtime_epoch = shift;
+    my $text;
+    my $color;
+    if (defined $modtime_epoch) {
+	my $age = time - $modtime_epoch;
+	my $age_human = $age < 86400 ? sprintf("%.1fd", $age/86400) : int($age/86400).'d';
+	$text = POSIX::strftime("%F %T", localtime $modtime_epoch) . " ($age_human)";
+	$color = $age >= 14*86400 ? '#800000' :
+	         $age >=  7*86400 ? 'brown' :
+		 $age >=  3*86400 ? 'DarkGreen' :
+		 'DarkBlue';
+    } else {
+	$text = '...';
+	$color = 'black';
+    }
+    $modtime_l->configure(-text => $text, -fg => $color);
 }
 
 {
@@ -2076,7 +2314,7 @@ sub get_recent_states {
 	    for my $f (map { @$_ } values %$hash) {
 		if (!exists $report_file_info{$f}) {
 		    if (open my $fh, $f) {
-			my($epoch) = $f =~ m{\.(\d+)\.\d+\.rpt$};
+			my($epoch) = $f =~ m{\.(\d+)\.-?\d+\.rpt$};
 			my($x_test_reporter_perl, $archname);
 			while(<$fh>) {
 			    chomp;
@@ -2206,8 +2444,15 @@ sub rough_pv_os_analysis {
 		    $arch_os_version = 'centos7'; # 'CentOS7';
 		} elsif ($entry->{archname} =~ m{ 4\.18\.0-.*\.el8[._]}) {
 		    $arch_os_version = 'centos8'; # 'CentOS8'; --- but may be also rocky 8.5
+		} elsif ($entry->{archname} =~ m{ 5\.14\.0-.*\.el9[._]}) {
+		    $arch_os_version = 'rocky9'; # may be also CentOS9?
+		} elsif ($entry->{archname} =~ m{ 5\.4\.188-104\.359\.amzn2\.x86_64}
+		      || $entry->{archname} =~ m{ 5\.10\.235-227\.919\.amzn2\.x86_64}) {
+		    $arch_os_version = 'rocky9'; # system perl, maybe created in a container?
 		} elsif ($entry->{archname} =~ m{ \d+\.\d+\.\d+-\d+\.fc(\d+)\.}) {
 		    $arch_os_version = "fedora$1";
+		} elsif ($entry->{archname} =~ m{-linux-thread-multi 6\.11\.0}) {
+		    $arch_os_version = "fedora43"; # fedora41? (system perl), may also be fedora42 or fedora43
 		} elsif ($entry->{archname} =~ m{ 3\.2\.0}) {
 		    $arch_os_version = 'wheezy'; # 'Debian/wheezy?';
 		} elsif ($entry->{archname} =~ m{ 3\.16\.}) {
@@ -2227,13 +2472,31 @@ sub rough_pv_os_analysis {
 		} elsif ($entry->{archname} =~ m{ 5\.3\.0-(24|40)-}) {
 		    $arch_os_version = 'eoan'; # 'Ubuntu 19.10?';
 		} elsif ($entry->{archname} =~ m{ 5\.4\.0-(33|37|73|88|90|96|109)-} ||
-			 $entry->{archname} =~ m{ 5\.13\.0-(28)-}
+			 $entry->{archname} =~ m{ 5\.13\.0-(28|41)-}
 			) {
 		    $arch_os_version = 'focal'; # 'Ubuntu 20.04?';
 		} elsif ($entry->{archname} =~ m{ (5\.3\.0|5\.4\.0|5\.6\.0|5\.10\.0)-}) {
 		    $arch_os_version = 'bullseye'; # 'Debian/bullseye?';
-		} elsif ($entry->{archname} =~ m{ 5\.15\.0-(25|30)-}) {
+		} elsif ($entry->{archname} =~ m{ 5\.15\.0-(25|30|46|56|76|79|131|134|186)-}) {
 		    $arch_os_version = 'jammy'; # 'Ubuntu 22.04?';
+		} elsif ($entry->{archname} =~ m{ 6\.1\.0-1009-oem}) {
+		    $arch_os_version = 'jammy'; # 'Ubuntu 22.04', oem (?) version
+		} elsif ($entry->{archname} =~ m{ 6\.8\.0-(35|51)-}) {
+		    $arch_os_version = 'noble'; # 'Ubuntu 24.04?';
+		} elsif ($entry->{archname} =~ m{ 6\.14\.0-37-}) {
+		    $arch_os_version = 'noble'; # 'Ubuntu 24.04?';
+		} elsif ($entry->{archname} =~ m{ 7\.0\.0-28-}) {
+		    $arch_os_version = 'noble'; # 'Ubuntu 24.04?';
+		} elsif ($entry->{archname} eq 'aarch64-linux-gnu-thread-multi 6.1.0') {
+		    $arch_os_version = 'noble'; # 'Ubuntu 24.04? (system perl)';
+		} elsif ($entry->{archname} =~ m{ 6.1.0-(25|26|28|31|33|37|42|44|48|49|51)-}) {
+		    $arch_os_version = 'bookworm'; # 'Debian/bookworm?';
+		} elsif ($entry->{archname} =~ m{ 6\.1\.0$}) {
+		    $arch_os_version = 'trixie'; # 'Debian/trixie?';
+		} elsif ($entry->{archname} =~ m{ 6\.\d+\.\d+\+deb13(\.\d+)?-}) {
+		    $arch_os_version = 'trixie'; # 'Debian/trixie!';
+		} elsif ($entry->{archname} =~ m{ 6\.12\.54-0-lts}) {
+		    $arch_os_version = 'alpine';
 		} else {
 		    warn "INFO: Unrecognized archname '$entry->{archname}' -> fallback to 'linux'\n";
 		    $arch_os_version = 'linux';
@@ -2391,6 +2654,7 @@ sub nextfile {
     my $increment = shift || 1;
     if ($currfile_i+$increment <= $#files) {
 	$currfile_i+=$increment;
+	do_read_annotate_files(); # maybe re-read
 	set_currfile();
     } else {
 	if ($quit_at_end) {
@@ -2473,7 +2737,7 @@ sub is_user_at_computer {
 
 sub parse_report_filename {
     my $filename = shift;
-    if (my($state, $distv_arch, $epoch, $pid) = $filename =~ m{(?:^|/)($the_ct_states_rx)\.(.*)\.(\d+)\.(\d+)\.rpt$}) {
+    if (my($state, $distv_arch, $epoch, $pid) = $filename =~ m{(?:^|/)($the_ct_states_rx)\.(.*)\.(\d+)\.(-?\d+)\.rpt$}) {
 	my @tokens = split /\./, $distv_arch;
 	my $distv = shift @tokens;
 	my $arch;
@@ -2530,6 +2794,25 @@ sub parse_distvname {
     ($currdist, $currversion);
 }
 
+sub do_read_annotate_files {
+    if (@annotate_files) {
+	if (keys %annotate_files_mtime) {
+	    my $need_to_reload = 0;
+	    for my $annotate_file (@annotate_files) {
+		my $mtime = (stat($annotate_file))[9];
+		if (defined $mtime && $annotate_files_mtime{$annotate_file} < $mtime) {
+		    warn "INFO: $annotate_file needs to be reloaded...\n";
+		    $need_to_reload++;
+		}
+	    }
+	    return if !$need_to_reload;
+	}
+	if (@annotate_files) {
+	    ($distvname2annotation, $distname2annotation) = read_annotate_txt(@annotate_files);
+	}
+    }
+}
+
 sub read_annotate_txt {
     my($mandatory_file, @optional_files) = @_;
     my(%distvname2annotation, %distname2annotation);
@@ -2557,6 +2840,7 @@ sub read_annotate_txt {
 		next;
 	    }
 	}
+	my $mtime = (stat($file))[9];
 	while(<$fh>) {
 	    chomp;
 	    next if /^\s*$/;
@@ -2566,21 +2850,53 @@ sub read_annotate_txt {
 	    next if !defined $distname; # may happen for invalid distnames like "font_ft2_0.1.0"
 
 	    $add_annotation->(\$distvname2annotation{$distvname}, $annotation);
+
+	    my $annotation_record = {
+		version => $distversion,
+		annotation => $annotation,
+		file => $file,
+		linenumber => $.,
+	    };
 	    if (exists $distname2annotation{$distname}) {
 		my $cmp = cmp_version($distname2annotation{$distname}->{version}, $distversion);
 		if ($cmp < 0) { # existing is older
-		    $distname2annotation{$distname} = { version => $distversion, annotation => $annotation };
+		    $distname2annotation{$distname} = $annotation_record;
 		} elsif ($cmp == 0) {
 		    $add_annotation->(\$distname2annotation{$distname}->{annotation}, $annotation);
 		} else {
 		    # ignore
 		}
 	    } else {
-		$distname2annotation{$distname} = { version => $distversion, annotation => $annotation };
+		$distname2annotation{$distname} = $annotation_record;
 	    }		
 	}
+	$annotate_files_mtime{$file} = $mtime;
     }
     (\%distvname2annotation, \%distname2annotation);
+}
+
+sub get_list_of_cpan_prefs { # CPAN distroprefs
+    my %dist_with_prefs;
+    if (opendir(my $DIR, $prefs_dir)) {
+	while(defined(my $file = readdir $DIR)) {
+	    next if $file =~ /^\d+/; # convention: skip files like 01.DISABLED.yml etc, all starting with digits
+	    next if $file =~ /^zz-/; # convention: skip files starting with zz (e.g. zz-automated-testing.yml)
+	    if ($file =~ m{^(.*)\.(ya?ml|dd)$}) {
+		push @{ $dist_with_prefs{$1} }, $file;
+	    }
+	}
+
+	# keep only one file in %dist_with_prefs values, prefer yaml file
+	while(my($k,$v) = each %dist_with_prefs) {
+	    my($yaml_file) = grep { /\.ya?ml$/ } @$v;
+	    if (!defined $yaml_file) {
+		$yaml_file = $v->[0];
+	    }
+	    $dist_with_prefs{$k} = $yaml_file;
+	}
+    }
+
+    \%dist_with_prefs;
 }
 
 sub read_auto_good_file {
@@ -2656,7 +2972,8 @@ sub get_cached_rt_subject {
 	    warn "INFO: Not found in cache, try to fetch from $url...\n";
 	    $subject = get_subject_from_rt($url);
 	    if (defined $subject) {
-		$db{$url} = $subject;
+		my $latin1_subject = eval { unidecode_any($subject, "iso-8859-1") } // $subject;
+		$db{$url} = $latin1_subject;
 	    }
 	}
     };
@@ -2669,9 +2986,22 @@ sub get_cached_rt_subject {
 sub get_subject_from_rt {
     my($url) = @_;
 
+    # Hack: inject a hopefully warking aws-waf-token into the request
+    my $aws_waf_token;
+    if (eval { require "$FindBin::RealBin/firefox_cookie_finder.pl"; 1 }) {
+	$aws_waf_token = FirefoxCookieFinder::find_cookie_value("aws-waf-token", "rt.cpan.org", expected_lifetime => 4, debug => 1);
+	if ($url =~ m{^\Qhttps://rt.cpan.org/Ticket/Display.html?id=\E(\d+)}) {
+	    my $new_url = 'https://rt.cpan.org/Public/Bug/Display.html?id=' . $1;
+	    warn "INFO: change RT URL from $url to $new_url.\n";
+	    $url = $new_url;
+	}
+    } else {
+	warn "WARN: cannot load firefox_cookie_finder.pl, probably next fetch will fail...\n";
+    }
+
     require LWP::UserAgent;
     require HTML::Entities;
-    my $resp = LWP::UserAgent->new(timeout => 20)->get($url);
+    my $resp = LWP::UserAgent->new(timeout => 20)->get($url, (defined $aws_waf_token ? (Cookie => "aws-waf-token=$aws_waf_token") : ()));
     if ($resp->is_success) {
 	# Quick'n'dirty parsing
     DO_PARSE: {
@@ -2690,6 +3020,7 @@ sub get_subject_from_rt {
 	    }
 
 	    if (eval { require HTML::TreeBuilder; require Encode; 1 }) {
+		#open my $ofh, ">", "/tmp/test.html"; print $ofh $content;
 		my $tree = HTML::TreeBuilder->new;
 		$tree->parse_content(Encode::decode_utf8($content)); # assume utf-8, without checking
 		for my $element ($tree->look_down('class', 'message-header-key')) {
@@ -2703,6 +3034,21 @@ sub get_subject_from_rt {
 			    $subject =~ s{^\s+}{};
 			    return $subject;
 			}
+		    }
+		}
+		warn "WARNING: Did not find message-header-key+value with HTML::TreeBuilder, fallback to title parsing\n";
+		# message-header-key+value may be missing, maybe if a subject was added later?
+		for my $element ($tree->look_down('_tag', 'title')) {
+		    my $title = join("", $element->content_list);
+		    # there seem to be two variants for title formatting
+		    if ($title =~ /^\#\d+:\s+(.+)/) {
+			my $subject = $1;
+			return $subject;
+		    } elsif ($title =~ /^Bug\s+#\d+\s+for\s+.*?:\s+(.*)/) {
+			my $subject = $1;
+			return $subject;
+		    } else {
+			warn "WARNING: found unparsable title '$title'\n";
 		    }
 		}
 		warn "WARNING: Did not find anything with HTML::TreeBuilder, fallback to quick'n'dirty parsing\n";
@@ -2731,16 +3077,18 @@ sub get_subject_from_rt {
 	    }
 	}
     } else {
-	warn "ERROR: can't fetch $url: " . $resp->status_line . "\n";
+	warn "ERROR: can't fetch $url:\n" . $resp->dump . "\nRequest was:\n" . $resp->request->dump . "\n";
     }
 
     undef;
 }
 
+# note: works also for GitHub pulls
 sub get_cached_github_issue_title {
     my($url) = @_;
     my $title;
     if ($url =~ s{/github.com/}{/api.github.com/repos/}) {
+	$url =~ s{(/api.github.com/repos/[^/]+/[^/]+/pull)/}{$1s/}; # pull -> pulls
 	eval {
 	    require DB_File;
 	    require Fcntl;
@@ -2761,7 +3109,11 @@ sub get_cached_github_issue_title {
 		my $resp = LWP::UserAgent->new(timeout => 20)->get($url);
 		if ($resp->is_success) {
 		    $title = JSON::XS::decode_json($resp->decoded_content(charset => "none"))->{title};
-		    $db{$url} = $title;
+		    my $latin1_title = eval { unidecode_any($title, "iso-8859-1") } // $title;
+		    if ($@) {
+			warn "Failed to all unidecode_any(), fallback with original title: $@";
+		    }
+		    $db{$url} = $latin1_title;
 		} else {
 		    die "Cannot get URL $url: " . $resp->dump . "\n";
 		}
@@ -2779,11 +3131,12 @@ sub get_cached_github_issue_title {
 sub get_cached_gitlab_issue_title {
     my($url) = @_;
     my $title;
-    if (my($project, $issue) = $url =~ m{^https?://gitlab.com/(.+?/.+?)/(?:-/)?issues/(\d+)}) {
+    if (my($host, $project, $type, $issue) = $url =~ m{^https?://([^/]+)/(.+?/.+?)/(?:-/)?(issues|work_items)/(\d+)}) {
 	eval {
 	    require URI::Escape;
 	    my $enc_project = URI::Escape::uri_escape($project);
-	    my $api_url = "https://gitlab.com/api/v4/projects/$enc_project/issues/$issue";
+	    # note: both issues and work_items use "issues" in the API
+	    my $api_url = "https://$host/api/v4/projects/$enc_project/issues/$issue";
 
 	    require DB_File;
 	    require Fcntl;
@@ -2798,15 +3151,19 @@ sub get_cached_gitlab_issue_title {
 	    if (exists $db{$url}) {
 		$title = $db{$url};
 	    } else {
-		warn "INFO: Not found in cache, try to fetch from $url...\n";
+		warn "INFO: Not found in cache, try to fetch from $api_url...\n";
 		require LWP::UserAgent;
 		require JSON::XS;
-		my $resp = LWP::UserAgent->new(timeout => 20)->get($api_url);
+		# explicitly set Accept header, otherwise anti-bot systems like Anubis could respond with a challenge page
+		my $resp = LWP::UserAgent->new(timeout => 20)->get($api_url, Accept => 'application/json');
 		if ($resp->is_success) {
-		    $title = JSON::XS::decode_json($resp->decoded_content(charset => "none"))->{title};
+		    $title = eval { JSON::XS::decode_json($resp->decoded_content(charset => "none"))->{title} };
+		    if (!defined $title) {
+			die "Content fetched from $api_url cannot be deserialized as JSON. Error: $@";
+		    }
 		    $db{$url} = $title;
 		} else {
-		    die "Cannot get URL $url: " . $resp->dump . "\n";
+		    die "Cannot get URL $api_url: " . $resp->dump . "\n";
 		}
 	    }
 	};
@@ -2817,6 +3174,175 @@ sub get_cached_gitlab_issue_title {
 	warn "WARN: Unexpected gitlab URL '$url'";
     }
     $title;
+}
+
+sub get_cached_bitbucket_issue_title {
+    my($url) = @_;
+    my $title;
+    if (my($owner, $repo, $issue_number, $short_subject) = $url =~ m|https://bitbucket\.org/([^/]+)/([^/]+)/issues/(\d+)(?:/(.+))?|) {
+	eval {
+	    require DB_File;
+	    require Fcntl;
+	    my $cache_file = _db_file_filename("$ENV{HOME}/.cache/ctr_good_or_invalid/bitbucket_issue_titles.db");
+	    if (!-d dirname($cache_file)) {
+		require File::Path;
+		File::Path::mkpath(dirname($cache_file));
+	    }
+	    # XXX implement locking for all!
+	    tie my %db, 'DB_File', $cache_file, &Fcntl::O_RDWR|&Fcntl::O_CREAT|($^O eq 'freebsd' ? &Fcntl::O_EXLOCK : 0), 0644
+		or die "ERROR: Can't tie cache file $cache_file: $!";
+	    if (exists $db{$url}) {
+		$title = $db{$url};
+	    } else {
+		warn "INFO: Not found in cache, try to fetch from $url...\n";
+		require LWP::UserAgent;
+		require JSON::XS;
+		require YAML;
+		require MIME::Base64;
+		my $creds = YAML::LoadFile("$ENV{HOME}/.bitbucket");
+		my $username = $creds->{username} // die "username is missing in ~/.bitbucket";
+		my $app_password = $creds->{'app-password'} // die "app-password is missing in ~/.bitbucket";
+		my $ua = LWP::UserAgent->new(timeout => 20);
+		my $auth = MIME::Base64::encode_base64("$username:$app_password");
+		$ua->default_header('Authorization' => "Basic $auth");
+		my $api_url = "https://api.bitbucket.org/2.0/repositories/$owner/$repo/issues/$issue_number";
+		my $response = $ua->get($api_url);
+		if ($response->is_success) {
+		    my $issue_data = JSON::XS::decode_json($response->content);
+		    $title = $issue_data->{title};
+		    my $latin1_title = eval { unidecode_any($title, "iso-8859-1") } // $title;
+		    if ($@) {
+			warn "Failed to all unidecode_any(), fallback with original title: $@";
+		    }
+		    $db{$url} = $latin1_title;
+		} else {
+		    die "Cannot get URL $api_url: " . $response->dump . "\n";
+		}
+	    }
+	};
+	if ($@) {
+	    warn "ERROR: $@";
+	    if (!defined $title && $short_subject) {
+		$title = $short_subject; # use it, but don't cache it
+	    }
+	}
+    } else {
+	warn "WARN: Unexpected bitbucket URL '$url'";
+    }
+    $title;
+}
+
+sub get_cached_codeberg_issue_title {
+    my ($url) = @_;
+    my $title;
+
+    if ($url =~ m{^https?://codeberg\.org/([^/]+)/([^/]+)/(issues|pull)/(\d+)$}) {
+        my ($owner, $repo, $type, $number) = ($1, $2, $3, $4);
+        my $api_url = "https://codeberg.org/api/v1/repos/$owner/$repo/" . ($type eq 'pull' ? 'pulls' : 'issues') . "/$number";
+
+        eval {
+            require DB_File;
+            require Fcntl;
+            my $cache_file = _db_file_filename("$ENV{HOME}/.cache/ctr_good_or_invalid/codeberg_issue_titles.db");
+            if (!-d dirname($cache_file)) {
+                require File::Path;
+                File::Path::mkpath(dirname($cache_file));
+            }
+
+            tie my %db, 'DB_File', $cache_file, &Fcntl::O_RDWR|&Fcntl::O_CREAT|($^O eq 'freebsd' ? &Fcntl::O_EXLOCK : 0), 0644
+                or die "ERROR: Can't tie cache file $cache_file: $!";
+
+            if (exists $db{$api_url}) {
+                $title = $db{$api_url};
+            } else {
+                warn "INFO: Not found in cache, fetching from $api_url...\n";
+                require LWP::UserAgent;
+                require JSON::XS;
+                my $resp = LWP::UserAgent->new(timeout => 20)->get($api_url);
+                if ($resp->is_success) {
+                    $title = JSON::XS::decode_json($resp->decoded_content(charset => "none"))->{title};
+                    my $latin1_title = eval { unidecode_any($title, "iso-8859-1") } // $title;
+                    if ($@) {
+                        warn "Failed to call unidecode_any(), fallback with original title: $@";
+                    }
+                    $db{$api_url} = $latin1_title;
+                } else {
+                    die "Cannot fetch from Codeberg API URL $api_url: " . $resp->dump . "\n";
+                }
+            }
+        };
+        if ($@) {
+            warn "ERROR: $@";
+        }
+    } else {
+        warn "WARN: Unexpected Codeberg URL '$url'";
+    }
+
+    return $title;
+}
+
+sub get_cached_trac_issue_title {
+    my($url) = @_;
+    my $title;
+
+    if ($url =~ m{^https?://trac\.(xapian\.org)/ticket/(\d+)$}) {
+        my ($site, $number) = ($1, $2);
+
+        eval {
+            require DB_File;
+            require Fcntl;
+            my $cache_file = _db_file_filename("$ENV{HOME}/.cache/ctr_good_or_invalid/trac_issue_titles.db");
+            if (!-d dirname($cache_file)) {
+                require File::Path;
+                File::Path::mkpath(dirname($cache_file));
+            }
+
+            tie my %db, 'DB_File', $cache_file, &Fcntl::O_RDWR|&Fcntl::O_CREAT|($^O eq 'freebsd' ? &Fcntl::O_EXLOCK : 0), 0644
+                or die "ERROR: Can't tie cache file $cache_file: $!";
+
+            if (exists $db{$url}) {
+                $title = $db{$url};
+            } else {
+		$title = get_subject_from_trac($url);
+		if (defined $title) {
+		    my $latin1_title = eval { unidecode_any($title, "iso-8859-1") } // $title;
+		    $db{$url} = $latin1_title;
+		}		    
+            }
+        };
+        if ($@) {
+            warn "ERROR: $@";
+        }
+    } else {
+        warn "WARN: Unexpected trac URL '$url'";
+    }
+
+    return $title;
+}
+
+sub get_subject_from_trac {
+    my($url) = @_;
+
+    if (eval { require HTML::TreeBuilder; require Encode; 1 }) {
+	warn "INFO: Not found in cache, fetching from $url...\n";
+	require LWP::UserAgent;
+	my $resp = LWP::UserAgent->new(timeout => 20)->get($url);
+	if ($resp->is_success) {
+	    my $content = $resp->decoded_content(charset => 'none');
+	    my $tree = HTML::TreeBuilder->new;
+	    $tree->parse_content(Encode::decode_utf8($content)); # assume utf-8, without checking
+	    my($element) = $tree->look_down(_tag => 'title');
+	    if ($element) {
+		my $subject = join("", $element->content_list);
+		$subject =~ s{^\s+}{};
+		return $subject;
+	    }
+	} else {
+	    die "Cannot fetch from trac URL $url: " . $resp->dump . "\n";
+	}
+    } else {
+	die "require HTML::TreeBuilder to fetch title from trac issue, got error: $@";
+    }
 }
 
 sub make_query_string {
@@ -2937,6 +3463,54 @@ sub _db_file_filename {
     $filename . ($DB_File::db_version eq '' || $DB_File::db_version <= 1 ? '' : int($DB_File::db_version));
 }
 
+# Taken from my_everything_checker_checks which took it from BBBikeAdvanced.pm
+sub start_ptksh {
+    # Is there already a (withdrawn) ptksh?
+    foreach my $mw0 (Tk::MainWindow::Existing()) {
+	if ($mw0->title =~ /^ptksh/) {
+	    $mw0->deiconify;
+	    $mw0->raise;
+	    return;
+	}
+    }
+    require Config;
+    my @perldirs = grep { defined $_ && -x $_ } ($Config::Config{'sitebin'}, $Config::Config{'scriptdir'});
+    my $perldir;
+    local @ARGV; # otherwise ptksh tries to load $AGV[0]
+    TRY: {
+        # Find the ptksh script
+        for $perldir (@perldirs) {
+            if (-r "$perldir/ptksh") {
+		require "$perldir/ptksh";
+                last TRY;
+            }
+        }
+	$perldir = dirname($^X);
+	if (-r "$perldir/ptksh") {
+	    require "$perldir/ptksh";
+	} else {
+	    my $f = ((Tk::MainWindow::Existing())[0])->getOpenFile
+		((-d $perldir ? (-initialdir => $perldir) : ()),
+		 -title => "Path to ptksh",
+		);
+	    if (defined $f) {
+		require $f;
+	    } else {
+		return;
+	    }
+	}
+    } 
+
+    # The created mainwindow is unnecessary - destroy it
+    foreach my $mw0 (Tk::MainWindow::Existing()) {
+	if ($mw0->title eq '$mw') {
+	    $mw0->destroy;
+	} elsif ($mw0->title eq 'ptksh') {
+	    $mw0->protocol('WM_DELETE_WINDOW' => [$mw0, 'withdraw']);
+	}
+    }
+}
+
 # REPO BEGIN
 # REPO NAME sort_by_example /home/e/eserte/src/srezic-repository 
 # REPO MD5 44ca029b43df0207958ba6b2f276f3eb
@@ -2952,6 +3526,57 @@ sub sort_by_example ($@) {
 	my $score_b = $score{$b};
 	!defined $score_a && !defined $score_b ? $a cmp $b : $score{$b} <=> $score{$a};
     } @_;
+}
+# REPO END
+
+# REPO BEGIN
+# REPO NAME unidecode_any /home/e/eserte/src/srezic-repository 
+# REPO MD5 59f056efd990dc126e49f5e846eee797
+sub unidecode_any {
+    my($text, $encoding) = @_;
+
+    require Encode;
+
+    # provide better conversions for german umlauts
+    my %override = ("\xc4" => "Ae",
+		    "\xd6" => "Oe",
+		    "\xdc" => "Ue",
+		    "\xe4" => "ae",
+		    "\xf6" => "oe",
+		    "\xfc" => "ue",
+		   );
+    my $override_rx = "(" . join("|", map { quotemeta } keys %override) . ")";
+    $override_rx = qr{$override_rx};
+
+    my $res = "";
+
+    if (!eval {
+	Encode->VERSION(2.12); # need v2.12 to support coderef
+	$res = Encode::encode($encoding, $text,
+			      sub {
+				  my $ch = chr $_[0];
+				  if ($ch =~ $override_rx) {
+				      return $override{$ch};
+				  } else {
+				      my $ascii = unidecode($ch);
+				      Encode::_utf8_off($ascii);
+				      $ascii;
+				  }
+			      });
+	1;
+    }) {
+	for (split //, $text) {
+	    my $conv = eval { Encode::encode($encoding, $_, Encode::FB_CROAK()) };
+	    if ($@) {
+		require Text::Unidecode;
+		$res .= Text::Unidecode::unidecode($_);
+	    } else {
+		$res .= $conv;
+	    }
+	}
+    }
+
+    $res;
 }
 # REPO END
 

@@ -1,0 +1,86 @@
+#!/usr/bin/env perl
+# -*- perl -*-
+
+use strict;
+use warnings;
+
+use Getopt::Long;
+use URI;
+
+use FindBin;
+use lib $FindBin::RealBin;
+require "firefox_cookie_finder.pl";
+
+my @cookie_names;
+my $profile;
+my $debug;
+my $method;
+Getopt::Long::Configure("pass_through");
+GetOptions(
+    'cookie-name=s@' => \@cookie_names,
+    'profile=s' => \$profile,
+    'debug!' => \$debug,
+    'method=s' => \$method,
+);
+my $url = $ARGV[-1]; # XXX must not be true!
+if (!$url) {
+    die "No URL found in commandline";
+}
+
+my $u = URI->new($url);
+my $host = eval { $u->host }
+    or die "Cannot get host name out of '$url': $@";
+
+my @cookie_name_values;
+for my $cookie_name (@cookie_names) {
+    my $cookie_value = FirefoxCookieFinder::find_cookie_value(
+	$cookie_name, $host,
+	(defined $profile ? (profile => $profile) : ()),
+	(defined $debug ? (debug => $debug) : ()),
+	(defined $method ? (method => $method) : ()),
+    );
+    if (!defined $cookie_value) {
+	die "Cannot find cookie $cookie_name for host $host.\n";
+    }
+    push @cookie_name_values, "$cookie_name=$cookie_value";
+}
+
+my @cookie_opts;
+if (@cookie_name_values) {
+    my $cookie_val = join("; ", @cookie_name_values);
+    if (0) {
+	# This does not seem to work with large cookies and some curl
+	# versions (e.g. 7.81). See https://curl.se/mail/lib-2023-05/0017.html
+	# In newer curl versions (e.g. 8.9.1) the limit was raised from 4k to 8k,
+	# and additionally a warning is issued, if it's exceeded.
+	# Nevertheless, keep the -H code.
+	@cookie_opts = ('--cookie', $cookie_val);
+    } else {
+	@cookie_opts = ('-H', "Cookie: $cookie_val");
+    }
+}
+
+my @cmd = ('curl', @cookie_opts, @ARGV);
+system @cmd;
+die "@cmd failed" if $? != 0;
+
+__END__
+
+=head1 EXAMPLES
+
+Make sure you made a recent authenticated visit to rt.cpan.org using
+Firefox, and maybe wait a minute or so to make sure that the cookie
+database is flushed to disk.
+
+Then call:
+
+    curl-with-cookie --silent --cookie-name aws-waf-token 'https://rt.cpan.org/Public/Bug/Display.html?id=122062' | grep '<title>'
+
+By default the cookie value is extracted using DBI+DBD::SQLite if available,
+falling back to a 'sqlite3'/'sqlite' binary in PATH otherwise. Use
+C<--method> to force a specific extraction method (C<auto>, C<dbi>, or
+C<sqlite>):
+
+    curl-with-cookie --method sqlite --cookie-name aws-waf-token 'https://rt.cpan.org/Public/Bug/Display.html?id=122062'
+
+=cut
