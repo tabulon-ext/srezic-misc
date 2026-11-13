@@ -221,9 +221,31 @@ exit($success ? 0 : 1);
 	    # Then filter by --filter-github-workflow-rx (if set)
 	    my @filtered_candidates = $filter_github_workflow_rx ? (grep { $_->{path} =~ $filter_github_workflow_rx } @candidates) : @candidates;
 
-	    # Pick the only or first workflow run
+	    # Pick either the only or "best" or first workflow run
 	    if (@filtered_candidates) {
-		my($path, $id) = @{$filtered_candidates[0]}{qw(path id) };
+		my $best_match;
+		if (@filtered_candidates > 1) {
+		    my $best_match_score;
+		    for my $candidate (@filtered_candidates) {
+			my $score = 0;
+			my $basename = lc basename $candidate->{path};
+			# some heuristics what could be a more usable workflow to pick
+			$score++ if $basename =~ /deploy/;
+			$score++ if $basename =~ /apply/;
+			$score++ if $basename =~ /prod/;
+			$score++ if $basename =~ /stable/;
+			if (!defined $best_match_score || $score > $best_match_score) {
+			    $best_match = $candidate;
+			    $best_match_score = $score;
+			}
+		    }
+		    if (!$best_match) {
+			$best_match = $filtered_candidates[0]; # just pick the first one
+		    }
+		} else {
+		    $best_match = $filtered_candidates[0];
+		}
+		my($path, $id) = @{$best_match}{qw(path id) };
 		# If there's more than one matching active workflow, then pick the first, but tell the user which one was chosen.
 		if (@candidates > 1) {
 		    if ($debug) {
